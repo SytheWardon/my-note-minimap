@@ -12,6 +12,19 @@ An [Obsidian](https://obsidian.md) plugin that adds a colour-coded minimap / scr
 - Per-device margins for phones with notches or rounded corners
 - Option to hide on mobile, plus exclusions
 
+## Compatibility
+
+- Requires **Obsidian 1.4.0 or newer**.
+- Works on desktop and mobile (iOS and Android).
+
+## Recommended setup (mobile)
+
+For the best experience on mobile, turn off the pull-down gesture so it doesn't compete with the scrollbar when you drag near the top of a note:
+
+1. Open **Settings → Interface**.
+2. Scroll to the **Mobile** section.
+3. Tap **Configure mobile Quick Action** and set the command to **None**.
+
 ## Installation
 
 **From the community list:** Settings → Community plugins → Browse → search "My Note Minimap" → Install → Enable.
