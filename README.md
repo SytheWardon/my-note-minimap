@@ -1,4 +1,4 @@
-# My Note Minimap
+# My Note Minimap (Srcoll Bar)
 
 An [Obsidian](https://obsidian.md) plugin that adds a colour-coded minimap / scrollbar beside each markdown note, with click-and-drag navigation. Works on desktop and mobile.
 
