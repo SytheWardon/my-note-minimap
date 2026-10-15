@@ -1,0 +1,691 @@
+.note-minimap-host {
+	position: relative;
+}
+
+.note-minimap-host.note-minimap-pad-left {
+	padding-left: var(--nm-width, 0px);
+}
+
+.note-minimap-host.note-minimap-pad-right {
+	padding-right: var(--nm-width, 0px);
+}
+
+.note-minimap {
+	position: absolute;
+	top: var(--nm-top, 5%);
+	width: var(--nm-width, 15%);
+	height: var(--nm-height, 60%);
+	z-index: 30;
+	overflow: hidden;
+	user-select: none;
+	-webkit-user-select: none;
+	cursor: pointer;
+	/* Layer promotion prevents the masked strip from being re-rasterised on
+	   every frame of the zoom animation, which would flash its fade. */
+	will-change: transform;
+	backface-visibility: hidden;
+}
+
+.note-minimap.note-minimap-left {
+	left: 0;
+	right: auto;
+}
+
+.note-minimap.note-minimap-right {
+	left: auto;
+	right: 0;
+}
+
+/* The zoomed minimap overlaps the note text, so give it a raised surface to
+   stay legible while the zoom key is held. The surface also stays on while
+   the scale animation plays so shrinking minimaps keep it until they settle. */
+.note-minimap.note-minimap-zoomed,
+.note-minimap.note-minimap-animating {
+	background: var(--background-primary);
+	border-radius: var(--radius-m);
+	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+
+.note-minimap.note-minimap-dragging {
+	overflow: visible;
+}
+
+/* While the whole minimap scales between sizes, its content may briefly
+   extend beyond the layout box; keep it visible so nothing is clipped. */
+.note-minimap.note-minimap-animating {
+	overflow: visible;
+	transform: var(--nm-anim-transform, none);
+	transform-origin: var(--nm-anim-origin, 0 0);
+}
+
+.note-minimap.note-minimap-dragging .note-minimap-lines {
+	-webkit-mask-image: linear-gradient(
+		to bottom,
+		rgba(0, 0, 0, 0.15) 0,
+		rgba(0, 0, 0, 0.15) calc(var(--nm-fade-top, 0px) - var(--nm-fade-band, 40px)),
+		black var(--nm-fade-top, 0px),
+		black var(--nm-fade-bot, 100%),
+		rgba(0, 0, 0, 0.15) calc(var(--nm-fade-bot, 0px) + var(--nm-fade-band, 40px)),
+		rgba(0, 0, 0, 0.15) 100%
+	);
+	mask-image: linear-gradient(
+		to bottom,
+		rgba(0, 0, 0, 0.15) 0,
+		rgba(0, 0, 0, 0.15) calc(var(--nm-fade-top, 0px) - var(--nm-fade-band, 40px)),
+		black var(--nm-fade-top, 0px),
+		black var(--nm-fade-bot, 100%),
+		rgba(0, 0, 0, 0.15) calc(var(--nm-fade-bot, 0px) + var(--nm-fade-band, 40px)),
+		rgba(0, 0, 0, 0.15) 100%
+	);
+}
+
+/* The strip renders the note's lines as bars; it scales with the whole
+   minimap element during zooming, so it needs no transform of its own.
+   Its own layer keeps the masked fade composited instead of flickering. */
+.note-minimap-lines {
+	position: absolute;
+	left: 0;
+	right: 0;
+	top: var(--nm-strip-top, 0px);
+	height: var(--nm-strip-height, 100%);
+	will-change: transform;
+}
+
+.note-minimap-padding {
+	position: absolute;
+	left: 0;
+	right: 0;
+	top: var(--nm-pad-top, 0px);
+	height: var(--nm-pad-height, 0px);
+	background: repeating-linear-gradient(
+		-45deg,
+		var(--background-modifier-border) 0 2px,
+		transparent 2px 6px
+	);
+	opacity: 0.5;
+}
+
+.note-minimap-line {
+	position: absolute;
+	left: 0;
+	top: var(--nm-line-top, 0px);
+	width: var(--nm-line-width, 100%);
+	height: var(--nm-line-height, 2px);
+}
+
+.note-minimap-viewport {
+	position: absolute;
+	left: 0;
+	right: 0;
+	top: var(--nm-vp-top, 0px);
+	height: var(--nm-vp-height, 100%);
+	border: 1px solid var(--text-accent);
+	background: var(--text-accent);
+	opacity: 0.25;
+	border-radius: 2px;
+	pointer-events: none;
+	box-sizing: border-box;
+}
+
+/* Title tooltip shown beside a title bar while the minimap is zoomed. */
+.note-minimap-title-tooltip {
+	position: absolute;
+	top: var(--nm-tip-top, 0px);
+	z-index: var(--layer-tooltip);
+	max-width: 280px;
+	padding: 4px 8px;
+	border-radius: var(--radius-m);
+	background-color: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+	line-height: var(--line-height-tight);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	pointer-events: none;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+	transform: translateY(-50%);
+	display: none;
+}
+
+.note-minimap-title-tooltip.note-minimap-title-tooltip-visible {
+	display: block;
+}
+
+.note-minimap.note-minimap-right .note-minimap-title-tooltip {
+	right: calc(100% + 8px);
+}
+
+.note-minimap.note-minimap-left .note-minimap-title-tooltip {
+	left: calc(100% + 8px);
+}
+
+/* Hint shown beside the minimap while the pointer is over it at normal size,
+   positioned at the cursor's height. */
+.note-minimap-zoom-hint {
+	position: absolute;
+	top: var(--nm-hint-top, 0px);
+	z-index: var(--layer-tooltip);
+	max-width: 280px;
+	padding: 4px 8px;
+	border-radius: var(--radius-m);
+	background-color: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+	line-height: var(--line-height-tight);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	pointer-events: none;
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+	transform: translateY(-50%);
+	display: none;
+}
+
+.note-minimap-zoom-hint.note-minimap-zoom-hint-visible {
+	display: block;
+}
+
+.note-minimap.note-minimap-right .note-minimap-zoom-hint {
+	right: calc(100% + 8px);
+}
+
+.note-minimap.note-minimap-left .note-minimap-zoom-hint {
+	left: calc(100% + 8px);
+}
+
+.note-minimap-line.nm-blank {
+	background: transparent;
+}
+
+.note-minimap-line.nm-text {
+	background: var(--text-normal);
+	opacity: 0.35;
+}
+
+.note-minimap-line.nm-h1 {
+	background: #e06c75;
+}
+
+.note-minimap-line.nm-h2 {
+	background: #d19a66;
+}
+
+.note-minimap-line.nm-h3 {
+	background: #e5c07b;
+}
+
+.note-minimap-line.nm-h4 {
+	background: #98c379;
+}
+
+.note-minimap-line.nm-h5 {
+	background: #56b6c2;
+}
+
+.note-minimap-line.nm-h6 {
+	background: #61afef;
+}
+
+.note-minimap-line.nm-code {
+	background: #61afef;
+	opacity: 0.55;
+}
+
+.note-minimap-line.nm-quote {
+	background: #c678dd;
+	opacity: 0.6;
+}
+
+.note-minimap-line.nm-list {
+	background: #98c379;
+	opacity: 0.6;
+}
+
+.note-minimap-line.nm-hr {
+	background: #d19a66;
+	opacity: 0.7;
+}
+
+.note-minimap-line.nm-em {
+	background: #e5c07b;
+	opacity: 0.6;
+}
+
+.note-minimap-line.nm-frontmatter {
+	background: #9aa5b1;
+	opacity: 0.75;
+}
+
+/* Settings: exclusion list and required-input validation. */
+.nm-validation-relative {
+	position: relative;
+}
+
+/* Add-exclusion modal. */
+.nm-modal-desc {
+	margin-top: 0;
+	color: var(--text-muted);
+}
+
+.nm-exclusion-input-wrap .nm-exclusion-input {
+	width: 100%;
+}
+
+/* Required-input validation error highlight. */
+.nm-exclusion-input-wrap .nm-exclusion-input.nm-input-error {
+	border-color: var(--color-red);
+	box-shadow: 0 0 0 1px var(--color-red);
+}
+
+/* Settings: exclusion list as a removable tag cloud. */
+.setting-item.nm-exclusion-setting {
+	flex-wrap: wrap;
+}
+
+.setting-item.nm-exclusion-setting.nm-exclusion-setting {
+	padding-bottom: 0;
+}
+
+.setting-item.nm-exclusion-setting .setting-item-info {
+	flex: 1 1 0;
+	min-width: 0;
+}
+
+.setting-item.nm-exclusion-setting .setting-item-control {
+	flex: 0 0 auto;
+}
+
+.nm-exclusion-group {
+	padding-bottom: 12px;
+}
+
+.nm-exclusion-tags {
+	flex-basis: 100%;
+	display: flex;
+	flex-wrap: wrap;
+	align-content: flex-start;
+	gap: 8px;
+	margin-top: 8px;
+	padding: 0 0 12px;
+	min-height: 0;
+	border: none;
+	background: none;
+}
+
+.nm-exclusion-empty {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.nm-exclusion-tag {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	max-width: 100%;
+	padding: 4px 6px 4px 12px;
+	border-radius: 999px;
+	background-color: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+}
+
+.nm-exclusion-tag-text {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.nm-exclusion-tag-remove {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	padding: 0;
+	border: none;
+	border-radius: 50%;
+	background: transparent;
+	color: var(--text-muted);
+	font-size: 14px;
+	line-height: 1;
+	cursor: pointer;
+}
+
+.nm-exclusion-tag-remove:hover {
+	color: var(--color-red);
+	background-color: var(--background-modifier-hover);
+}
+
+/* Validation tooltip shown under the input while the error is active. */
+.nm-validation-tooltip {
+	position: absolute;
+	top: var(--nm-vt-top, calc(100% + 4px));
+	left: var(--nm-vt-left, 0px);
+	z-index: var(--layer-tooltip);
+	max-width: 260px;
+	padding: 4px 8px;
+	border-radius: var(--radius-m);
+	background-color: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+	line-height: var(--line-height-tight);
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+	pointer-events: none;
+}
+/* Scrollbar style: a thin overlay bar that behaves like a native scrollbar. */
+.note-minimap.nm-scrollbar {
+	width: var(--nm-width, 18px);
+	background: transparent;
+	will-change: auto;
+}
+
+.note-minimap.nm-scrollbar .note-minimap-lines,
+.note-minimap.nm-scrollbar .note-minimap-padding {
+	display: none;
+}
+
+.note-minimap.nm-scrollbar .note-minimap-viewport {
+	left: 2px;
+	right: 2px;
+	border: none;
+	border-radius: 999px;
+	background: var(--scrollbar-thumb-bg, var(--text-faint));
+	opacity: 0.7;
+	pointer-events: none;
+}
+
+.note-minimap.nm-scrollbar.note-minimap-dragging .note-minimap-viewport {
+	background: var(--scrollbar-active-thumb-bg, var(--text-accent));
+	opacity: 0.95;
+}
+
+/* The strip itself is a wide invisible touch target; the thumb is hugged to the edge. */
+.note-minimap.nm-scrollbar.note-minimap-right .note-minimap-viewport {
+	left: auto;
+	right: 3px;
+	width: var(--nm-thumb, 18px);
+}
+
+.note-minimap.nm-scrollbar.note-minimap-left .note-minimap-viewport {
+	right: auto;
+	left: 3px;
+	width: var(--nm-thumb, 18px);
+}
+
+/* Scrollbar styling, driven by the plugin's settings. */
+.note-minimap.nm-scrollbar .note-minimap-viewport {
+	background: var(--nm-thumb-color, var(--text-accent));
+	opacity: var(--nm-thumb-opacity, 0.75);
+	border-radius: var(--nm-thumb-radius, 999px);
+	box-shadow: var(--nm-thumb-shadow, none);
+	transition: opacity 0.15s ease;
+}
+
+.note-minimap.nm-scrollbar.note-minimap-dragging .note-minimap-viewport {
+	background: var(--nm-thumb-color, var(--text-accent));
+	opacity: 1;
+	box-shadow: var(--nm-thumb-shadow-active, none);
+}
+
+.note-minimap.nm-scrollbar::before {
+	content: '';
+	position: absolute;
+	top: 0;
+	bottom: 0;
+	width: var(--nm-thumb, 18px);
+	background: var(--background-modifier-border);
+	opacity: var(--nm-track-opacity, 0);
+	border-radius: var(--nm-thumb-radius, 999px);
+	pointer-events: none;
+}
+
+.note-minimap.nm-scrollbar.note-minimap-right::before {
+	right: 3px;
+}
+
+.note-minimap.nm-scrollbar.note-minimap-left::before {
+	left: 3px;
+}
+
+/* Invalid hex code in the settings. */
+.nm-hex-input.nm-input-error {
+	border-color: var(--color-red);
+	box-shadow: 0 0 0 1px var(--color-red);
+}
+
+/* Hex colour input in settings. */
+.nm-hex-input {
+	width: 96px;
+	font-family: var(--font-monospace);
+}
+
+.nm-hex-input.nm-input-error {
+	border-color: var(--color-red);
+	box-shadow: 0 0 0 1px var(--color-red);
+}
+
+/* Quick-pick colour swatches in settings. */
+.setting-item.nm-swatch-setting {
+	flex-direction: column;
+	align-items: stretch;
+	gap: 8px;
+}
+
+.nm-swatch-setting .setting-item-control {
+	flex-direction: column;
+	align-items: stretch;
+	justify-content: flex-start;
+	gap: 12px;
+}
+
+.nm-swatch-label {
+	font-size: var(--font-ui-smaller, 12px);
+	color: var(--text-muted);
+	margin-bottom: 6px;
+	text-align: left;
+}
+
+.nm-swatch-group {
+	width: 100%;
+}
+
+.nm-swatch-grid {
+	display: flex;
+	flex-flow: row wrap;
+	justify-content: flex-start;
+	align-items: center;
+	gap: 10px;
+	width: 100%;
+}
+
+/* Fixed-size pills. flex/width are locked so mobile button styles cannot stretch them. */
+.nm-swatch-setting .nm-swatch-grid button.nm-swatch {
+	position: relative;
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	box-sizing: border-box;
+	flex: 0 0 auto !important;
+	width: 64px !important;
+	min-width: 64px;
+	max-width: 64px;
+	height: 36px;
+	padding: 0;
+	border-radius: 999px;
+	border: 1px solid var(--background-modifier-border);
+	background: var(--nm-swatch, var(--interactive-accent));
+	color: var(--nm-swatch-ink, #fff);
+	box-shadow: none;
+	cursor: pointer;
+}
+
+.nm-swatch-setting .nm-swatch-grid button.nm-swatch.nm-swatch-auto {
+	font-size: var(--font-ui-smaller, 12px);
+	font-weight: 600;
+}
+
+.nm-swatch-setting .nm-swatch-grid button.nm-swatch:hover {
+	filter: brightness(1.1);
+}
+
+.nm-swatch-setting .nm-swatch-grid button.nm-swatch.is-selected {
+	outline: 2px solid var(--text-normal);
+	outline-offset: 2px;
+}
+
+.nm-swatch-tick {
+	display: none;
+	align-items: center;
+	justify-content: center;
+}
+
+.nm-swatch-tick svg {
+	width: 16px;
+	height: 16px;
+}
+
+.nm-swatch-setting .nm-swatch-grid button.nm-swatch.is-selected .nm-swatch-tick {
+	display: inline-flex;
+}
+
+/* The "Auto" chip shows its label until selected, then a tick next to it. */
+.nm-swatch-auto .nm-swatch-tick {
+	margin-left: 4px;
+}
+
+/* Arrow buttons (visual only; the strip handles the touches). */
+.note-minimap.nm-scrollbar .nm-arrow {
+	position: absolute;
+	width: var(--nm-thumb, 18px);
+	height: var(--nm-arrow, 24px);
+	display: none;
+	pointer-events: none;
+	z-index: 2;
+}
+
+.note-minimap.nm-scrollbar.nm-has-arrows .nm-arrow {
+	display: block;
+}
+
+.note-minimap.nm-scrollbar.note-minimap-right .nm-arrow {
+	right: 3px;
+}
+
+.note-minimap.nm-scrollbar.note-minimap-left .nm-arrow {
+	left: 3px;
+}
+
+.note-minimap.nm-scrollbar .nm-arrow-up {
+	top: 0;
+}
+
+.note-minimap.nm-scrollbar .nm-arrow-down {
+	bottom: 0;
+}
+
+.note-minimap.nm-scrollbar .nm-arrow::after {
+	content: '';
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	transform: translate(-50%, -50%);
+	border-left: calc(var(--nm-thumb, 18px) * 0.32) solid transparent;
+	border-right: calc(var(--nm-thumb, 18px) * 0.32) solid transparent;
+	opacity: 0.85;
+}
+
+.note-minimap.nm-scrollbar .nm-arrow-up::after {
+	border-bottom: calc(var(--nm-thumb, 18px) * 0.4) solid var(--nm-thumb-color, var(--text-accent));
+}
+
+.note-minimap.nm-scrollbar .nm-arrow-down::after {
+	border-top: calc(var(--nm-thumb, 18px) * 0.4) solid var(--nm-thumb-color, var(--text-accent));
+}
+
+/* Keep the faint track between the arrows. */
+.note-minimap.nm-scrollbar::before {
+	top: var(--nm-arrow-gap, 0px);
+	bottom: var(--nm-arrow-gap, 0px);
+}
+
+/* Margins for dead zones (rounded corners, cut-outs, curved screen edges). */
+.note-minimap.nm-scrollbar.note-minimap-right {
+	right: var(--nm-edge, 0px);
+	left: auto;
+}
+
+.note-minimap.nm-scrollbar.note-minimap-left {
+	left: var(--nm-edge, 0px);
+	right: auto;
+}
+
+/* Smooth thumb: moved with a transform instead of re-laying out every frame. */
+.note-minimap.nm-scrollbar .note-minimap-viewport {
+	top: 0;
+	will-change: transform;
+}
+
+/* No long-press callouts, selection or tap flash on the strip. */
+.note-minimap {
+	-webkit-user-select: none;
+	user-select: none;
+	-webkit-touch-callout: none;
+	-webkit-tap-highlight-color: transparent;
+}
+
+/* Pressed-arrow feedback. */
+.note-minimap.nm-scrollbar .nm-arrow::after {
+	transition: opacity 0.08s ease, transform 0.08s ease;
+}
+
+.note-minimap.nm-scrollbar.nm-press-up .nm-arrow-up::after,
+.note-minimap.nm-scrollbar.nm-press-down .nm-arrow-down::after {
+	opacity: 1;
+	transform: translate(-50%, -50%) scale(1.3);
+}
+
+/* Touch area switched off: the strip is display-only and touches fall through to the note. */
+.note-minimap.nm-touch-off,
+.note-minimap.nm-touch-off * {
+	pointer-events: none !important;
+}
+
+.note-minimap.nm-touch-off .nm-arrow {
+	display: none !important;
+}
+
+/* Header button highlight when the touch area is on. */
+.view-action.is-active {
+	color: var(--text-accent);
+}
+
+/* Top header and bottom bar: ease in and out while the strip scrolls the note. */
+body.nm-animate-bars .mobile-navbar,
+body.nm-animate-bars .view-header {
+	transition: transform 0.45s cubic-bezier(0.22, 0.9, 0.25, 1), opacity 0.35s ease !important;
+	will-change: transform, opacity;
+}
+
+body.nm-animate-bars.nm-bars-hidden .mobile-navbar {
+	transform: translateY(calc(100% + 28px)) !important;
+	opacity: 0 !important;
+	pointer-events: none;
+}
+
+body.nm-animate-bars.nm-bars-hidden .view-header {
+	transform: translateY(calc(-100% - 28px)) !important;
+	opacity: 0 !important;
+	pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	body.nm-animate-bars .mobile-navbar,
+	body.nm-animate-bars .view-header {
+		transition-duration: 0.01s !important;
+	}
+}
