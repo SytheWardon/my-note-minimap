@@ -1,13 +1,16 @@
+/* ===== My Note Minimap ===== */
+
+/* ---- Layout: the strip owns its own column and the note is padded away from it ---- */
 .note-minimap-host {
 	position: relative;
 }
 
 .note-minimap-host.note-minimap-pad-left {
-	padding-left: var(--nm-width, 0px);
+	padding-left: var(--nm-gutter, var(--nm-width, 0px));
 }
 
 .note-minimap-host.note-minimap-pad-right {
-	padding-right: var(--nm-width, 0px);
+	padding-right: var(--nm-gutter, var(--nm-width, 0px));
 }
 
 .note-minimap {
@@ -17,11 +20,11 @@
 	height: var(--nm-height, 60%);
 	z-index: 30;
 	overflow: hidden;
-	user-select: none;
-	-webkit-user-select: none;
 	cursor: pointer;
-	/* Layer promotion prevents the masked strip from being re-rasterised on
-	   every frame of the zoom animation, which would flash its fade. */
+	-webkit-user-select: none;
+	user-select: none;
+	-webkit-touch-callout: none;
+	-webkit-tap-highlight-color: transparent;
 	will-change: transform;
 	backface-visibility: hidden;
 }
@@ -36,30 +39,28 @@
 	right: 0;
 }
 
-/* The zoomed minimap overlaps the note text, so give it a raised surface to
-   stay legible while the zoom key is held. The surface also stays on while
-   the scale animation plays so shrinking minimaps keep it until they settle. */
-.note-minimap.note-minimap-zoomed,
-.note-minimap.note-minimap-animating {
-	background: var(--background-primary);
-	border-radius: var(--radius-m);
-	box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
-}
-
 .note-minimap.note-minimap-dragging {
 	overflow: visible;
 }
 
-/* While the whole minimap scales between sizes, its content may briefly
-   extend beyond the layout box; keep it visible so nothing is clipped. */
-.note-minimap.note-minimap-animating {
-	overflow: visible;
-	transform: var(--nm-anim-transform, none);
-	transform-origin: var(--nm-anim-origin, 0 0);
+/* Long-press on the header button hides the whole strip. */
+.note-minimap.nm-hidden {
+	display: none !important;
 }
 
+/* Touch switched off: display-only, touches fall through to the note. */
+.note-minimap.nm-touch-off,
+.note-minimap.nm-touch-off * {
+	pointer-events: none !important;
+}
+
+.note-minimap.nm-touch-off .nm-arrow {
+	display: none !important;
+}
+
+/* ---- Minimap style ---- */
 .note-minimap.note-minimap-dragging .note-minimap-lines {
-	-webkit-mask-image: linear-gradient(
+	--nm-mask: linear-gradient(
 		to bottom,
 		rgba(0, 0, 0, 0.15) 0,
 		rgba(0, 0, 0, 0.15) calc(var(--nm-fade-top, 0px) - var(--nm-fade-band, 40px)),
@@ -68,41 +69,20 @@
 		rgba(0, 0, 0, 0.15) calc(var(--nm-fade-bot, 0px) + var(--nm-fade-band, 40px)),
 		rgba(0, 0, 0, 0.15) 100%
 	);
-	mask-image: linear-gradient(
-		to bottom,
-		rgba(0, 0, 0, 0.15) 0,
-		rgba(0, 0, 0, 0.15) calc(var(--nm-fade-top, 0px) - var(--nm-fade-band, 40px)),
-		black var(--nm-fade-top, 0px),
-		black var(--nm-fade-bot, 100%),
-		rgba(0, 0, 0, 0.15) calc(var(--nm-fade-bot, 0px) + var(--nm-fade-band, 40px)),
-		rgba(0, 0, 0, 0.15) 100%
-	);
+	-webkit-mask-image: var(--nm-mask);
+	mask-image: var(--nm-mask);
 }
 
-/* The strip renders the note's lines as bars; it scales with the whole
-   minimap element during zooming, so it needs no transform of its own.
-   Its own layer keeps the masked fade composited instead of flickering. */
+/* Moved with a transform; its own layer keeps the masked fade from flickering. contain keeps
+   the thousands of bars from restyling anything outside the strip. */
 .note-minimap-lines {
 	position: absolute;
 	left: 0;
 	right: 0;
-	top: var(--nm-strip-top, 0px);
+	top: 0;
 	height: var(--nm-strip-height, 100%);
 	will-change: transform;
-}
-
-.note-minimap-padding {
-	position: absolute;
-	left: 0;
-	right: 0;
-	top: var(--nm-pad-top, 0px);
-	height: var(--nm-pad-height, 0px);
-	background: repeating-linear-gradient(
-		-45deg,
-		var(--background-modifier-border) 0 2px,
-		transparent 2px 6px
-	);
-	opacity: 0.5;
+	contain: layout style;
 }
 
 .note-minimap-line {
@@ -117,326 +97,86 @@
 	position: absolute;
 	left: 0;
 	right: 0;
-	top: var(--nm-vp-top, 0px);
-	height: var(--nm-vp-height, 100%);
+	top: 0;
 	border: 1px solid var(--text-accent);
 	background: var(--text-accent);
 	opacity: 0.25;
 	border-radius: 2px;
 	pointer-events: none;
 	box-sizing: border-box;
+	will-change: transform;
 }
 
-/* Title tooltip shown beside a title bar while the minimap is zoomed. */
-.note-minimap-title-tooltip {
-	position: absolute;
-	top: var(--nm-tip-top, 0px);
-	z-index: var(--layer-tooltip);
-	max-width: 280px;
-	padding: 4px 8px;
-	border-radius: var(--radius-m);
-	background-color: var(--background-primary);
-	border: 1px solid var(--background-modifier-border);
-	color: var(--text-normal);
-	font-size: var(--font-ui-small);
-	line-height: var(--line-height-tight);
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	pointer-events: none;
-	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-	transform: translateY(-50%);
-	display: none;
-}
+.note-minimap-line.nm-blank { background: transparent; }
+.note-minimap-line.nm-text { background: var(--text-normal); opacity: 0.35; }
+.note-minimap-line.nm-h1 { background: #e06c75; }
+.note-minimap-line.nm-h2 { background: #d19a66; }
+.note-minimap-line.nm-h3 { background: #e5c07b; }
+.note-minimap-line.nm-h4 { background: #98c379; }
+.note-minimap-line.nm-h5 { background: #56b6c2; }
+.note-minimap-line.nm-h6 { background: #61afef; }
+.note-minimap-line.nm-code { background: #61afef; opacity: 0.55; }
+.note-minimap-line.nm-quote { background: #c678dd; opacity: 0.6; }
+.note-minimap-line.nm-list { background: #98c379; opacity: 0.6; }
+.note-minimap-line.nm-hr { background: #d19a66; opacity: 0.7; }
+.note-minimap-line.nm-em { background: #e5c07b; opacity: 0.6; }
+.note-minimap-line.nm-frontmatter { background: #9aa5b1; opacity: 0.75; }
 
-.note-minimap-title-tooltip.note-minimap-title-tooltip-visible {
-	display: block;
-}
-
-.note-minimap.note-minimap-right .note-minimap-title-tooltip {
-	right: calc(100% + 8px);
-}
-
-.note-minimap.note-minimap-left .note-minimap-title-tooltip {
-	left: calc(100% + 8px);
-}
-
-/* Hint shown beside the minimap while the pointer is over it at normal size,
-   positioned at the cursor's height. */
-.note-minimap-zoom-hint {
-	position: absolute;
-	top: var(--nm-hint-top, 0px);
-	z-index: var(--layer-tooltip);
-	max-width: 280px;
-	padding: 4px 8px;
-	border-radius: var(--radius-m);
-	background-color: var(--background-primary);
-	border: 1px solid var(--background-modifier-border);
-	color: var(--text-normal);
-	font-size: var(--font-ui-small);
-	line-height: var(--line-height-tight);
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
-	pointer-events: none;
-	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-	transform: translateY(-50%);
-	display: none;
-}
-
-.note-minimap-zoom-hint.note-minimap-zoom-hint-visible {
-	display: block;
-}
-
-.note-minimap.note-minimap-right .note-minimap-zoom-hint {
-	right: calc(100% + 8px);
-}
-
-.note-minimap.note-minimap-left .note-minimap-zoom-hint {
-	left: calc(100% + 8px);
-}
-
-.note-minimap-line.nm-blank {
-	background: transparent;
-}
-
-.note-minimap-line.nm-text {
-	background: var(--text-normal);
-	opacity: 0.35;
-}
-
-.note-minimap-line.nm-h1 {
-	background: #e06c75;
-}
-
-.note-minimap-line.nm-h2 {
-	background: #d19a66;
-}
-
-.note-minimap-line.nm-h3 {
-	background: #e5c07b;
-}
-
-.note-minimap-line.nm-h4 {
-	background: #98c379;
-}
-
-.note-minimap-line.nm-h5 {
-	background: #56b6c2;
-}
-
-.note-minimap-line.nm-h6 {
-	background: #61afef;
-}
-
-.note-minimap-line.nm-code {
-	background: #61afef;
-	opacity: 0.55;
-}
-
-.note-minimap-line.nm-quote {
-	background: #c678dd;
-	opacity: 0.6;
-}
-
-.note-minimap-line.nm-list {
-	background: #98c379;
-	opacity: 0.6;
-}
-
-.note-minimap-line.nm-hr {
-	background: #d19a66;
-	opacity: 0.7;
-}
-
-.note-minimap-line.nm-em {
-	background: #e5c07b;
-	opacity: 0.6;
-}
-
-.note-minimap-line.nm-frontmatter {
-	background: #9aa5b1;
-	opacity: 0.75;
-}
-
-/* Settings: exclusion list and required-input validation. */
-.nm-validation-relative {
-	position: relative;
-}
-
-/* Add-exclusion modal. */
-.nm-modal-desc {
-	margin-top: 0;
-	color: var(--text-muted);
-}
-
-.nm-exclusion-input-wrap .nm-exclusion-input {
-	width: 100%;
-}
-
-/* Required-input validation error highlight. */
-.nm-exclusion-input-wrap .nm-exclusion-input.nm-input-error {
-	border-color: var(--color-red);
-	box-shadow: 0 0 0 1px var(--color-red);
-}
-
-/* Settings: exclusion list as a removable tag cloud. */
-.setting-item.nm-exclusion-setting {
-	flex-wrap: wrap;
-}
-
-.setting-item.nm-exclusion-setting.nm-exclusion-setting {
-	padding-bottom: 0;
-}
-
-.setting-item.nm-exclusion-setting .setting-item-info {
-	flex: 1 1 0;
-	min-width: 0;
-}
-
-.setting-item.nm-exclusion-setting .setting-item-control {
-	flex: 0 0 auto;
-}
-
-.nm-exclusion-group {
-	padding-bottom: 12px;
-}
-
-.nm-exclusion-tags {
-	flex-basis: 100%;
-	display: flex;
-	flex-wrap: wrap;
-	align-content: flex-start;
-	gap: 8px;
-	margin-top: 8px;
-	padding: 0 0 12px;
-	min-height: 0;
-	border: none;
-	background: none;
-}
-
-.nm-exclusion-empty {
-	color: var(--text-muted);
-	font-size: var(--font-ui-smaller);
-}
-
-.nm-exclusion-tag {
-	display: inline-flex;
-	align-items: center;
-	gap: 6px;
-	max-width: 100%;
-	padding: 4px 6px 4px 12px;
-	border-radius: 999px;
-	background-color: var(--background-primary);
-	border: 1px solid var(--background-modifier-border);
-	color: var(--text-normal);
-	font-size: var(--font-ui-smaller);
-}
-
-.nm-exclusion-tag-text {
-	overflow: hidden;
-	text-overflow: ellipsis;
-	white-space: nowrap;
-}
-
-.nm-exclusion-tag-remove {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	width: 20px;
-	height: 20px;
-	padding: 0;
-	border: none;
-	border-radius: 50%;
-	background: transparent;
-	color: var(--text-muted);
-	font-size: 14px;
-	line-height: 1;
-	cursor: pointer;
-}
-
-.nm-exclusion-tag-remove:hover {
-	color: var(--color-red);
-	background-color: var(--background-modifier-hover);
-}
-
-/* Validation tooltip shown under the input while the error is active. */
-.nm-validation-tooltip {
-	position: absolute;
-	top: var(--nm-vt-top, calc(100% + 4px));
-	left: var(--nm-vt-left, 0px);
-	z-index: var(--layer-tooltip);
-	max-width: 260px;
-	padding: 4px 8px;
-	border-radius: var(--radius-m);
-	background-color: var(--background-primary);
-	border: 1px solid var(--background-modifier-border);
-	color: var(--text-normal);
-	font-size: var(--font-ui-small);
-	line-height: var(--line-height-tight);
-	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
-	pointer-events: none;
-}
-/* Scrollbar style: a thin overlay bar that behaves like a native scrollbar. */
+/* ---- Scrollbar style: a thin overlay bar that behaves like a native scrollbar ---- */
 .note-minimap.nm-scrollbar {
 	width: var(--nm-width, 18px);
 	background: transparent;
 	will-change: auto;
+	/* Distance from the arrow glyph's resting spot (next to the bar) to the middle of the pill. */
+	--nm-shift: calc(var(--nm-width, 64px) / 2 - 3px - var(--nm-thumb, 18px) / 2);
 }
 
-.note-minimap.nm-scrollbar .note-minimap-lines,
-.note-minimap.nm-scrollbar .note-minimap-padding {
+.note-minimap.nm-scrollbar.note-minimap-right {
+	right: var(--nm-edge, 0px);
+	left: auto;
+}
+
+.note-minimap.nm-scrollbar.note-minimap-left {
+	left: var(--nm-edge, 0px);
+	right: auto;
+}
+
+.note-minimap.nm-scrollbar .note-minimap-lines {
 	display: none;
 }
 
+/* The thumb: hugs the screen edge inside the wider touch column; moved by transform only. */
 .note-minimap.nm-scrollbar .note-minimap-viewport {
-	left: 2px;
-	right: 2px;
 	border: none;
-	border-radius: 999px;
-	background: var(--scrollbar-thumb-bg, var(--text-faint));
-	opacity: 0.7;
-	pointer-events: none;
+	width: var(--nm-thumb, 18px);
+	background: var(--nm-thumb-color, var(--text-accent));
+	opacity: var(--nm-thumb-opacity, 0.75);
+	border-radius: var(--nm-thumb-radius, 999px);
+	box-shadow: var(--nm-thumb-shadow, none);
+	transition: opacity 0.15s ease, box-shadow 0.2s ease;
 }
 
-.note-minimap.nm-scrollbar.note-minimap-dragging .note-minimap-viewport {
-	background: var(--scrollbar-active-thumb-bg, var(--text-accent));
-	opacity: 0.95;
-}
-
-/* The strip itself is a wide invisible touch target; the thumb is hugged to the edge. */
 .note-minimap.nm-scrollbar.note-minimap-right .note-minimap-viewport {
 	left: auto;
 	right: 3px;
-	width: var(--nm-thumb, 18px);
 }
 
 .note-minimap.nm-scrollbar.note-minimap-left .note-minimap-viewport {
 	right: auto;
 	left: 3px;
-	width: var(--nm-thumb, 18px);
-}
-
-/* Scrollbar styling, driven by the plugin's settings. */
-.note-minimap.nm-scrollbar .note-minimap-viewport {
-	background: var(--nm-thumb-color, var(--text-accent));
-	opacity: var(--nm-thumb-opacity, 0.75);
-	border-radius: var(--nm-thumb-radius, 999px);
-	box-shadow: var(--nm-thumb-shadow, none);
-	transition: opacity 0.15s ease;
 }
 
 .note-minimap.nm-scrollbar.note-minimap-dragging .note-minimap-viewport {
-	background: var(--nm-thumb-color, var(--text-accent));
 	opacity: 1;
 	box-shadow: var(--nm-thumb-shadow-active, none);
 }
 
+/* The faint groove between the arrows. */
 .note-minimap.nm-scrollbar::before {
 	content: '';
 	position: absolute;
-	top: 0;
-	bottom: 0;
+	top: var(--nm-arrow-gap, 0px);
+	bottom: var(--nm-arrow-gap, 0px);
 	width: var(--nm-thumb, 18px);
 	background: var(--background-modifier-border);
 	opacity: var(--nm-track-opacity, 0);
@@ -444,32 +184,335 @@
 	pointer-events: none;
 }
 
-.note-minimap.nm-scrollbar.note-minimap-right::before {
-	right: 3px;
+.note-minimap.nm-scrollbar.note-minimap-right::before { right: 3px; }
+.note-minimap.nm-scrollbar.note-minimap-left::before { left: 3px; }
+
+/* The whole note fits on screen: nothing to scroll, so the bar and arrows rest quietly. */
+.note-minimap.nm-scrollbar.nm-no-scroll .note-minimap-viewport {
+	opacity: calc(var(--nm-thumb-opacity, 0.75) * 0.4);
 }
 
-.note-minimap.nm-scrollbar.note-minimap-left::before {
-	left: 3px;
+.note-minimap.nm-scrollbar.nm-no-scroll .nm-arrow {
+	opacity: 0.45;
 }
 
-/* Invalid hex code in the settings. */
-.nm-hex-input.nm-input-error {
-	border-color: var(--color-red);
-	box-shadow: 0 0 0 1px var(--color-red);
+/* ---- Arrow buttons (visual only; the strip handles the touches) ----
+   Each arrow zone spans the whole touch column; the glyph sits over the bar. */
+.note-minimap.nm-scrollbar .nm-arrow {
+	position: absolute;
+	left: 0;
+	right: 0;
+	height: var(--nm-arrow, 24px);
+	display: none;
+	pointer-events: none;
+	z-index: 2;
+	transition: opacity 0.2s ease;
 }
 
-/* Hex colour input in settings. */
+.note-minimap.nm-scrollbar.nm-has-arrows .nm-arrow { display: block; }
+.note-minimap.nm-scrollbar .nm-arrow-up { top: 0; }
+.note-minimap.nm-scrollbar .nm-arrow-down { bottom: 0; }
+
+/* Resting pill: a capsule centred in the touch column that springs open from the bar's side. */
+.note-minimap.nm-scrollbar .nm-arrow::before {
+	content: '';
+	position: absolute;
+	inset: calc(var(--nm-arrow, 24px) * 0.17) clamp(2px, calc(var(--nm-width, 64px) * 0.14), 10px);
+	border-radius: 999px;
+	background: var(--nm-thumb-color, var(--text-accent));
+	opacity: 0;
+	transform: scale(0.6, 0.75);
+	transition: opacity 0.3s ease 0.05s, transform 0.42s cubic-bezier(0.4, 0, 0.2, 1) 0.05s;
+}
+
+.note-minimap.nm-scrollbar.note-minimap-right .nm-arrow::before { transform-origin: 100% 50%; }
+.note-minimap.nm-scrollbar.note-minimap-left .nm-arrow::before { transform-origin: 0 50%; }
+
+/* Resting glyph: a triangle beside the bar. */
+.note-minimap.nm-scrollbar .nm-arrow::after {
+	content: '';
+	position: absolute;
+	top: 50%;
+	transform: translate(-50%, -50%);
+	translate: 0 0;
+	border-left: calc(var(--nm-glyph, 12px) * 0.5) solid transparent;
+	border-right: calc(var(--nm-glyph, 12px) * 0.5) solid transparent;
+	opacity: 0.85;
+	transition: transform 0.45s cubic-bezier(0.34, 1.45, 0.5, 1), opacity 0.25s ease,
+		translate 0.5s cubic-bezier(0.3, 1.25, 0.5, 1);
+}
+
+.note-minimap.nm-scrollbar.note-minimap-right .nm-arrow::after { left: calc(100% - 3px - var(--nm-thumb, 18px) / 2); }
+.note-minimap.nm-scrollbar.note-minimap-left .nm-arrow::after { left: calc(3px + var(--nm-thumb, 18px) / 2); }
+
+.note-minimap.nm-scrollbar .nm-arrow-up::after { border-bottom: calc(var(--nm-glyph, 12px) * 0.55) solid var(--nm-thumb-color, var(--text-accent)); }
+.note-minimap.nm-scrollbar .nm-arrow-down::after { border-top: calc(var(--nm-glyph, 12px) * 0.55) solid var(--nm-thumb-color, var(--text-accent)); }
+
+/* Pressed: the pill pops open with a little overshoot and the glyph glides to its middle,
+   pushing a touch in its direction of travel. Layers are only promoted while pressed. */
+.note-minimap.nm-scrollbar.nm-press-up .nm-arrow-up::before,
+.note-minimap.nm-scrollbar.nm-press-down .nm-arrow-down::before {
+	opacity: 0.22;
+	transform: scale(1);
+	transition: opacity 0.12s ease, transform 0.38s cubic-bezier(0.22, 1.3, 0.4, 1);
+	animation: nm-pill-pop 0.45s cubic-bezier(0.2, 0.8, 0.2, 1);
+	will-change: transform, opacity;
+}
+
+.note-minimap.nm-scrollbar.nm-press-up .nm-arrow-up::after,
+.note-minimap.nm-scrollbar.nm-press-down .nm-arrow-down::after {
+	opacity: 1;
+	transition: transform 0.14s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.12s ease,
+		translate 0.38s cubic-bezier(0.22, 1, 0.36, 1) 0.03s;
+	will-change: transform, translate, opacity;
+}
+
+.note-minimap.nm-scrollbar.nm-press-up .nm-arrow-up::after { transform: translate(-50%, calc(-50% - 2px)) scale(1.2); }
+.note-minimap.nm-scrollbar.nm-press-down .nm-arrow-down::after { transform: translate(-50%, calc(-50% + 2px)) scale(1.2); }
+
+.note-minimap.nm-scrollbar.note-minimap-right.nm-press-up .nm-arrow-up::after,
+.note-minimap.nm-scrollbar.note-minimap-right.nm-press-down .nm-arrow-down::after { translate: calc(var(--nm-shift) * -1) 0; }
+
+.note-minimap.nm-scrollbar.note-minimap-left.nm-press-up .nm-arrow-up::after,
+.note-minimap.nm-scrollbar.note-minimap-left.nm-press-down .nm-arrow-down::after { translate: var(--nm-shift) 0; }
+
+/* Held: the pill breathes and the glyph flows in the direction the note is moving, at a pace
+   that follows the Hold speed setting. */
+.note-minimap.nm-scrollbar.nm-holding.nm-press-up .nm-arrow-up::before,
+.note-minimap.nm-scrollbar.nm-holding.nm-press-down .nm-arrow-down::before {
+	animation: nm-pill-pop 0.45s cubic-bezier(0.2, 0.8, 0.2, 1),
+		nm-pill-breathe 1.1s ease-in-out 0.45s infinite alternate;
+}
+
+.note-minimap.nm-scrollbar.nm-holding.nm-press-up .nm-arrow-up::after { animation: nm-flow-up var(--nm-flow, 420ms) cubic-bezier(0.3, 0, 0.4, 1) infinite; }
+.note-minimap.nm-scrollbar.nm-holding.nm-press-down .nm-arrow-down::after { animation: nm-flow-down var(--nm-flow, 420ms) cubic-bezier(0.3, 0, 0.4, 1) infinite; }
+
+@keyframes nm-pill-pop {
+	0% { opacity: 0; transform: scale(0.6, 0.75); }
+	45% { opacity: 0.3; transform: scale(1.03, 1.08); }
+	100% { opacity: 0.22; transform: scale(1); }
+}
+
+@keyframes nm-pill-breathe {
+	from { opacity: 0.2; transform: scale(1, 1); }
+	to { opacity: 0.28; transform: scale(0.985, 1.04); }
+}
+
+@keyframes nm-flow-up {
+	0% { opacity: 0.3; transform: translate(-50%, calc(-50% + 3px)) scale(1.2); }
+	35% { opacity: 1; }
+	100% { opacity: 0.2; transform: translate(-50%, calc(-50% - 4px)) scale(1.2); }
+}
+
+@keyframes nm-flow-down {
+	0% { opacity: 0.3; transform: translate(-50%, calc(-50% - 3px)) scale(1.2); }
+	35% { opacity: 1; }
+	100% { opacity: 0.2; transform: translate(-50%, calc(-50% + 4px)) scale(1.2); }
+}
+
+/* At the very top / bottom the matching arrow rests, dimmed, and bumps instead of flowing. */
+.note-minimap.nm-scrollbar.nm-at-top .nm-arrow-up::after,
+.note-minimap.nm-scrollbar.nm-at-bottom .nm-arrow-down::after {
+	opacity: 0.25;
+}
+
+.note-minimap.nm-scrollbar.nm-at-top.nm-press-up .nm-arrow-up::before,
+.note-minimap.nm-scrollbar.nm-at-bottom.nm-press-down .nm-arrow-down::before,
+.note-minimap.nm-scrollbar.nm-at-top.nm-holding.nm-press-up .nm-arrow-up::before,
+.note-minimap.nm-scrollbar.nm-at-bottom.nm-holding.nm-press-down .nm-arrow-down::before {
+	opacity: 0.08;
+	animation: none;
+}
+
+.note-minimap.nm-scrollbar.nm-at-top.nm-press-up .nm-arrow-up::after,
+.note-minimap.nm-scrollbar.nm-at-top.nm-holding.nm-press-up .nm-arrow-up::after {
+	opacity: 0.45;
+	transform: translate(-50%, -50%) scale(1.1);
+	animation: nm-bump-up 0.4s ease-out;
+}
+
+.note-minimap.nm-scrollbar.nm-at-bottom.nm-press-down .nm-arrow-down::after,
+.note-minimap.nm-scrollbar.nm-at-bottom.nm-holding.nm-press-down .nm-arrow-down::after {
+	opacity: 0.45;
+	transform: translate(-50%, -50%) scale(1.1);
+	animation: nm-bump-down 0.4s ease-out;
+}
+
+@keyframes nm-bump-up {
+	0%, 100% { transform: translate(-50%, -50%) scale(1.1); }
+	35% { transform: translate(-50%, calc(-50% - 4px)) scale(1.1); }
+	65% { transform: translate(-50%, calc(-50% + 1px)) scale(1.1); }
+}
+
+@keyframes nm-bump-down {
+	0%, 100% { transform: translate(-50%, -50%) scale(1.1); }
+	35% { transform: translate(-50%, calc(-50% + 4px)) scale(1.1); }
+	65% { transform: translate(-50%, calc(-50% - 1px)) scale(1.1); }
+}
+
+/* ---- Top header and bottom bar: ease in and out while the strip scrolls the note ---- */
+body.nm-animate-bars .mobile-navbar,
+body.nm-animate-bars .view-header {
+	transition: transform 0.45s cubic-bezier(0.22, 0.9, 0.25, 1), opacity 0.35s ease !important;
+}
+
+body.nm-animate-bars.nm-bars-hidden .mobile-navbar {
+	transform: translateY(calc(100% + 28px)) !important;
+	opacity: 0 !important;
+	pointer-events: none;
+}
+
+body.nm-animate-bars.nm-bars-hidden .view-header {
+	transform: translateY(calc(-100% - 28px)) !important;
+	opacity: 0 !important;
+	pointer-events: none;
+}
+
+/* ---- Header button: hand icon with a round notch and an eye-with-a-slash while the scrollbar is hidden ---- */
+.view-action.is-active {
+	color: var(--text-accent);
+}
+
+@property --nm-cut {
+	syntax: '<length>';
+	inherits: false;
+	initial-value: -1px;
+}
+
+.nm-hand-btn {
+	position: relative;
+	--nm-s: var(--icon-size, 18px);
+}
+
+/* A circular piece is cut out of the hand's bottom right; the notch grows from nothing. */
+.nm-hand-btn > svg.svg-icon {
+	--nm-cut: -1px;
+	-webkit-mask-image: radial-gradient(circle at 80% 80%, transparent var(--nm-cut), #000 calc(var(--nm-cut) + 0.6px));
+	mask-image: radial-gradient(circle at 80% 80%, transparent var(--nm-cut), #000 calc(var(--nm-cut) + 0.6px));
+	transition: --nm-cut 0.4s cubic-bezier(0.34, 1.45, 0.64, 1);
+}
+
+.nm-hand-btn.nm-strip-off > svg.svg-icon {
+	--nm-cut: calc(var(--nm-s) * 0.25 + 1.3px);
+}
+
+/* The eye sits in the notch: it pops in, the slash is drawn across it, and it blinks once. */
+.nm-eye {
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	width: calc(var(--nm-s) * 0.5);
+	height: calc(var(--nm-s) * 0.5);
+	margin: calc(var(--nm-s) * -0.25) 0 0 calc(var(--nm-s) * -0.25);
+	transform: translate(calc(var(--nm-s) * 0.3), calc(var(--nm-s) * 0.3)) scale(0.2);
+	opacity: 0;
+	pointer-events: none;
+	transition: transform 0.4s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.2s ease;
+}
+
+.nm-eye svg {
+	display: block;
+	width: 100%;
+	height: 100%;
+	overflow: visible;
+}
+
+.nm-hand-btn.nm-strip-off .nm-eye {
+	opacity: 1;
+	transform: translate(calc(var(--nm-s) * 0.3), calc(var(--nm-s) * 0.3)) scale(1);
+}
+
+.nm-eye-slash {
+	stroke-dasharray: 1;
+	stroke-dashoffset: 1;
+	transition: stroke-dashoffset 0.28s ease 0.16s;
+}
+
+.nm-hand-btn.nm-strip-off .nm-eye-slash {
+	stroke-dashoffset: 0;
+}
+
+.nm-eye-shape {
+	transform-box: fill-box;
+	transform-origin: center;
+}
+
+.nm-hand-btn.nm-strip-off .nm-eye-shape {
+	animation: nm-eye-blink 0.35s ease 0.5s 1;
+}
+
+@keyframes nm-eye-blink {
+	0%, 100% { transform: scaleY(1); }
+	50% { transform: scaleY(0.12); }
+}
+
+/* ---- Short on-screen messages (hide / touch toggles, colour picks) ---- */
+.nm-toast {
+	position: fixed;
+	left: 50%;
+	bottom: calc(env(safe-area-inset-bottom, 0px) + 90px);
+	transform: translateX(-50%);
+	z-index: var(--layer-notice, 9999);
+	max-width: 80vw;
+	padding: 8px 14px;
+	border-radius: var(--radius-m, 8px);
+	background: var(--background-modifier-message, var(--background-secondary));
+	color: var(--text-normal);
+	font-size: var(--font-ui-small, 13px);
+	box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+	pointer-events: none;
+	animation: nm-toast-in 0.14s ease both;
+}
+
+.nm-toast.nm-toast-out {
+	animation: nm-toast-out 0.2s ease both;
+}
+
+@keyframes nm-toast-in {
+	from { opacity: 0; transform: translateX(-50%) translateY(6px); }
+	to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+@keyframes nm-toast-out {
+	from { opacity: 1; }
+	to { opacity: 0; }
+}
+
+/* ---- Reduced motion ---- */
+@media (prefers-reduced-motion: reduce) {
+	.note-minimap.nm-scrollbar .nm-arrow::before,
+	.note-minimap.nm-scrollbar .nm-arrow::after {
+		transition-duration: 0.01s !important;
+		animation: none !important;
+	}
+
+	body.nm-animate-bars .mobile-navbar,
+	body.nm-animate-bars .view-header,
+	.nm-hand-btn > svg.svg-icon,
+	.nm-eye,
+	.nm-eye-slash {
+		transition-duration: 0.01s !important;
+		transition-delay: 0s !important;
+	}
+
+	.nm-hand-btn.nm-strip-off .nm-eye-shape {
+		animation: none;
+	}
+}
+
+/* ---- Settings ---- */
 .nm-hex-input {
 	width: 96px;
 	font-family: var(--font-monospace);
 }
 
-.nm-hex-input.nm-input-error {
+.nm-hex-input.nm-input-error,
+.nm-exclusion-input-wrap .nm-exclusion-input.nm-input-error {
 	border-color: var(--color-red);
 	box-shadow: 0 0 0 1px var(--color-red);
 }
 
-/* Quick-pick colour swatches in settings. */
+/* Quick-pick colour swatches. */
 .setting-item.nm-swatch-setting {
 	flex-direction: column;
 	align-items: stretch;
@@ -558,134 +601,100 @@
 	margin-left: 4px;
 }
 
-/* Arrow buttons (visual only; the strip handles the touches). */
-.note-minimap.nm-scrollbar .nm-arrow {
+/* Exclusions: input, validation and a removable tag cloud. */
+.nm-validation-relative {
+	position: relative;
+}
+
+.nm-exclusion-input-wrap .nm-exclusion-input {
+	width: 100%;
+}
+
+.setting-item.nm-exclusion-setting {
+	flex-wrap: wrap;
+	padding-bottom: 0;
+}
+
+.setting-item.nm-exclusion-setting .setting-item-info {
+	flex: 1 1 0;
+	min-width: 0;
+}
+
+.setting-item.nm-exclusion-setting .setting-item-control {
+	flex: 0 0 auto;
+}
+
+.nm-exclusion-tags {
+	flex-basis: 100%;
+	display: flex;
+	flex-wrap: wrap;
+	align-content: flex-start;
+	gap: 8px;
+	margin-top: 8px;
+	padding: 0 0 12px;
+	min-height: 0;
+	border: none;
+	background: none;
+}
+
+.nm-exclusion-empty {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.nm-exclusion-tag {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	max-width: 100%;
+	padding: 4px 6px 4px 12px;
+	border-radius: 999px;
+	background-color: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	color: var(--text-normal);
+	font-size: var(--font-ui-smaller);
+}
+
+.nm-exclusion-tag-text {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.nm-exclusion-tag-remove {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	width: 20px;
+	height: 20px;
+	padding: 0;
+	border: none;
+	border-radius: 50%;
+	background: transparent;
+	color: var(--text-muted);
+	font-size: 14px;
+	line-height: 1;
+	cursor: pointer;
+}
+
+.nm-exclusion-tag-remove:hover {
+	color: var(--color-red);
+	background-color: var(--background-modifier-hover);
+}
+
+.nm-validation-tooltip {
 	position: absolute;
-	width: var(--nm-thumb, 18px);
-	height: var(--nm-arrow, 24px);
-	display: none;
+	top: var(--nm-vt-top, calc(100% + 4px));
+	left: var(--nm-vt-left, 0px);
+	z-index: var(--layer-tooltip);
+	max-width: 260px;
+	padding: 4px 8px;
+	border-radius: var(--radius-m);
+	background-color: var(--background-primary);
+	border: 1px solid var(--background-modifier-border);
+	color: var(--text-normal);
+	font-size: var(--font-ui-small);
+	line-height: var(--line-height-tight);
+	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 	pointer-events: none;
-	z-index: 2;
-}
-
-.note-minimap.nm-scrollbar.nm-has-arrows .nm-arrow {
-	display: block;
-}
-
-.note-minimap.nm-scrollbar.note-minimap-right .nm-arrow {
-	right: 3px;
-}
-
-.note-minimap.nm-scrollbar.note-minimap-left .nm-arrow {
-	left: 3px;
-}
-
-.note-minimap.nm-scrollbar .nm-arrow-up {
-	top: 0;
-}
-
-.note-minimap.nm-scrollbar .nm-arrow-down {
-	bottom: 0;
-}
-
-.note-minimap.nm-scrollbar .nm-arrow::after {
-	content: '';
-	position: absolute;
-	left: 50%;
-	top: 50%;
-	transform: translate(-50%, -50%);
-	border-left: calc(var(--nm-thumb, 18px) * 0.32) solid transparent;
-	border-right: calc(var(--nm-thumb, 18px) * 0.32) solid transparent;
-	opacity: 0.85;
-}
-
-.note-minimap.nm-scrollbar .nm-arrow-up::after {
-	border-bottom: calc(var(--nm-thumb, 18px) * 0.4) solid var(--nm-thumb-color, var(--text-accent));
-}
-
-.note-minimap.nm-scrollbar .nm-arrow-down::after {
-	border-top: calc(var(--nm-thumb, 18px) * 0.4) solid var(--nm-thumb-color, var(--text-accent));
-}
-
-/* Keep the faint track between the arrows. */
-.note-minimap.nm-scrollbar::before {
-	top: var(--nm-arrow-gap, 0px);
-	bottom: var(--nm-arrow-gap, 0px);
-}
-
-/* Margins for dead zones (rounded corners, cut-outs, curved screen edges). */
-.note-minimap.nm-scrollbar.note-minimap-right {
-	right: var(--nm-edge, 0px);
-	left: auto;
-}
-
-.note-minimap.nm-scrollbar.note-minimap-left {
-	left: var(--nm-edge, 0px);
-	right: auto;
-}
-
-/* Smooth thumb: moved with a transform instead of re-laying out every frame. */
-.note-minimap.nm-scrollbar .note-minimap-viewport {
-	top: 0;
-	will-change: transform;
-}
-
-/* No long-press callouts, selection or tap flash on the strip. */
-.note-minimap {
-	-webkit-user-select: none;
-	user-select: none;
-	-webkit-touch-callout: none;
-	-webkit-tap-highlight-color: transparent;
-}
-
-/* Pressed-arrow feedback. */
-.note-minimap.nm-scrollbar .nm-arrow::after {
-	transition: opacity 0.08s ease, transform 0.08s ease;
-}
-
-.note-minimap.nm-scrollbar.nm-press-up .nm-arrow-up::after,
-.note-minimap.nm-scrollbar.nm-press-down .nm-arrow-down::after {
-	opacity: 1;
-	transform: translate(-50%, -50%) scale(1.3);
-}
-
-/* Touch area switched off: the strip is display-only and touches fall through to the note. */
-.note-minimap.nm-touch-off,
-.note-minimap.nm-touch-off * {
-	pointer-events: none !important;
-}
-
-.note-minimap.nm-touch-off .nm-arrow {
-	display: none !important;
-}
-
-/* Header button highlight when the touch area is on. */
-.view-action.is-active {
-	color: var(--text-accent);
-}
-
-/* Top header and bottom bar: ease in and out while the strip scrolls the note. */
-body.nm-animate-bars .mobile-navbar,
-body.nm-animate-bars .view-header {
-	transition: transform 0.45s cubic-bezier(0.22, 0.9, 0.25, 1), opacity 0.35s ease !important;
-	will-change: transform, opacity;
-}
-
-body.nm-animate-bars.nm-bars-hidden .mobile-navbar {
-	transform: translateY(calc(100% + 28px)) !important;
-	opacity: 0 !important;
-	pointer-events: none;
-}
-
-body.nm-animate-bars.nm-bars-hidden .view-header {
-	transform: translateY(calc(-100% - 28px)) !important;
-	opacity: 0 !important;
-	pointer-events: none;
-}
-
-@media (prefers-reduced-motion: reduce) {
-	body.nm-animate-bars .mobile-navbar,
-	body.nm-animate-bars .view-header {
-		transition-duration: 0.01s !important;
-	}
 }

@@ -17,7 +17,8 @@ const DEFAULTS = {
 	insetEdge: null, // px gap between the scrollbar and the screen edge
 	touchEnabled: true, // false = the strip ignores touches (they reach the note)
 	touchButton: true, // show an on/off button in the note header
-	showArrows: false,
+	hideScrollbar: false, // long-press the header button to hide / show the whole strip
+	showArrows: true,
 	arrowSize: 36, // px height of each arrow button (also its touch zone)
 	stepSize: 120, // px scrolled per arrow tap
 	holdSpeed: 1200, // px per second while an arrow is held
@@ -36,16 +37,10 @@ const DEFAULTS = {
 	exclusions: [],
 };
 
+const DESKTOP_INSETS = { insetTop: 0, insetBottom: 0, insetEdge: 0 };
 const LINE_H = 2; // px per bar
 const GAP = 1; // px between bars
 const MAX_ROWS = 3000; // very long notes are sampled
-
-// Accepts "#abc", "abc", "#aabbcc" or "aabbcc" and returns "#aabbcc", or null if invalid.
-function normHex(v) {
-	let h = String(v).trim().replace(/^#/, '');
-	if (/^[0-9a-fA-F]{3}$/.test(h)) h = h.split('').map((c) => c + c).join('');
-	return /^[0-9a-fA-F]{6}$/.test(h) ? '#' + h.toLowerCase() : null;
-}
 
 // Turns note text into one descriptor per line (class + length + indent).
 function classify(text) {
@@ -283,26 +278,54 @@ class NoteMinimapPlugin extends Plugin {
 		}
 		this.settings.ver = 4;
 		this.states = new Map();
+		this._unloaded = false;
+		this._refreshQueued = false;
+		this.saveDirty = false;
+		this.saveSoon = debounce(() => this.flushSave(), 400, true);
 		this.barsHidden = false;
 		this.barsTimer = null;
 		this.buttons = new Map(); // view -> header button
 
 		this.addSettingTab(new MinimapSettingTab(this.app, this));
 
-		const refresh = () => this.refreshAll();
-		const refreshSoon = debounce(() => this.refreshAll(), 300, true);
+		// Several workspace events usually fire together for one action (opening a note, switching
+		// pane). Run one refresh after they have all fired instead of one per event.
+		const refresh = () => this.queueRefresh();
+		// Typing only needs the minimap lines (or the thumb size) refreshed, not every setting re-applied.
+		const refreshSoon = debounce(() => this.refreshContent(), 300, true);
 
 		this.registerEvent(this.app.workspace.on('layout-change', refresh));
-		this.registerEvent(this.app.workspace.on('active-leaf-change', refresh));
-		this.registerEvent(this.app.workspace.on('file-open', refresh));
+		this.registerEvent(this.app.workspace.on('active-leaf-change', () => {
+			this.setBars(false);
+			refresh();
+		}));
+		this.registerEvent(this.app.workspace.on('file-open', () => {
+			this.setBars(false);
+			refresh();
+		}));
 		this.registerEvent(this.app.workspace.on('editor-change', refreshSoon));
 		this.app.workspace.onLayoutReady(refresh);
 
 		// A rotation or a window resize can change the safe areas, so re-measure.
+		// Settings are written to disk shortly after the last change; make sure none is lost.
+		this.registerDomEvent(document, 'visibilitychange', () => {
+			if (document.visibilityState === 'hidden') this.flushSave();
+		});
 		this.registerDomEvent(window, 'resize', debounce(() => {
 			this._safe = null;
 			this.refreshAll();
 		}, 250, true));
+	}
+
+	// Workspace events, setting changes and resizes all land here: one refresh runs per tick,
+	// however many of them fire together (a slider drag used to refresh on every pixel).
+	queueRefresh() {
+		if (this._refreshQueued) return;
+		this._refreshQueued = true;
+		queueMicrotask(() => {
+			this._refreshQueued = false;
+			if (!this._unloaded) this.refreshAll();
+		});
 	}
 
 	// ---- Per-device defaults -------------------------------------------------
@@ -329,9 +352,13 @@ class NoteMinimapPlugin extends Plugin {
 	}
 
 	device() {
+		if (!Platform.isMobile) return DESKTOP_INSETS;
+		if (!this._safe) {
+			this._safe = this.readSafeInsets();
+			this._dev = null;
+		}
+		if (this._dev && this._devSide === this.settings.side) return this._dev;
 		const even = (n) => Math.round(n / 2) * 2;
-		if (!Platform.isMobile) return { insetTop: 0, insetBottom: 0, insetEdge: 0 };
-		if (!this._safe) this._safe = this.readSafeInsets();
 		const safe = this._safe;
 		// The long side of the screen in CSS px, so it is the same in portrait and landscape.
 		const long = Math.max(screen.width || 0, screen.height || 0);
@@ -341,7 +368,14 @@ class NoteMinimapPlugin extends Plugin {
 		top = Math.max(top, even(safe.top + 60));
 		bottom = Math.max(bottom, even(safe.bottom + 36));
 		const sideInset = this.settings.side === 'left' ? safe.left : safe.right;
-		return { insetTop: top, insetBottom: bottom, insetEdge: Math.max(2, Math.ceil(sideInset)) };
+		this._devSide = this.settings.side;
+		this._dev = { insetTop: top, insetBottom: bottom, insetEdge: Math.max(2, Math.ceil(sideInset)) };
+		return this._dev;
+	}
+
+	// Width of the touch column: your setting, but never narrower than the bar needs.
+	touchWidth() {
+		return Math.max(this.settings.hitWidth, this.settings.thumbWidth + 6);
 	}
 
 	// The margin actually in use: your own value, or this device's automatic one.
@@ -351,10 +385,12 @@ class NoteMinimapPlugin extends Plugin {
 	}
 
 	onunload() {
+		this._unloaded = true;
+		this.flushSave();
+		this.clearToast();
 		for (const view of Array.from(this.states.keys())) this.detach(view);
 		this.clearButtons();
-		this.setBars(false);
-		document.body.removeClass('nm-animate-bars');
+		this.releaseBars();
 	}
 
 	// ---- Top header / bottom bar: slide away going down, glide back going up ----
@@ -371,10 +407,19 @@ class NoteMinimapPlugin extends Plugin {
 		document.body.toggleClass('nm-bars-hidden', hidden);
 	}
 
+	releaseBars() {
+		this.setBars(false);
+		this._barsCls = false;
+		document.body.removeClass('nm-animate-bars');
+	}
+
 	// Called every frame the engine moves the note. Down hides, up (or the very top) shows.
 	trackBars(st, pos) {
 		if (!this.settings.animateBars) return;
-		document.body.addClass('nm-animate-bars');
+		if (!this._barsCls) {
+			this._barsCls = true;
+			document.body.addClass('nm-animate-bars');
+		}
 		const d = pos - st.barLast;
 		st.barLast = pos;
 		if (d === 0) return;
@@ -382,21 +427,135 @@ class NoteMinimapPlugin extends Plugin {
 		st.barAcc += d;
 		if (pos < 12 || st.barAcc < -14) this.setBars(false);
 		else if (st.barAcc > 36) this.setBars(true);
+		// Safety net: whatever stops the note, the bars always come back once movement ceases.
+		if (this.barsHidden) {
+			const t = performance.now();
+			if (!this.barsArmedAt || t - this.barsArmedAt > 200) {
+				this.barsArmedAt = t;
+				this.armBars(1100);
+			}
+		}
+	}
+
+	armBars(ms) {
+		if (!this.barsHidden) return;
+		if (this.barsTimer) clearTimeout(this.barsTimer);
+		this.barsTimer = setTimeout(() => {
+			this.barsTimer = null;
+			this.setBars(false);
+		}, ms);
 	}
 
 	// When the note stops, bars that are still away come back after a short pause.
 	settleBars() {
-		if (!this.settings.animateBars || !this.barsHidden) return;
-		if (this.barsTimer) clearTimeout(this.barsTimer);
-		this.barsTimer = setTimeout(() => this.setBars(false), 1100);
+		if (!this.settings.animateBars) return;
+		this.armBars(1100);
 	}
 
 	// ---- Header button: scrollbar touch on / off ----------------------------
 
+	// A tiny message of our own instead of Obsidian's Notice: it always goes away by itself after a
+	// moment (no swiping), and a new one replaces the old so quick toggles never pile up.
+	toast(msg, ms) {
+		this.clearToast();
+		const el = document.body.createDiv({ cls: 'nm-toast', text: msg });
+		this._toastEl = el;
+		this._toastT = setTimeout(() => {
+			this._toastT = null;
+			el.addClass('nm-toast-out');
+			setTimeout(() => {
+				el.remove();
+				if (this._toastEl === el) this._toastEl = null;
+			}, 200);
+		}, ms || 600);
+	}
+
+	clearToast() {
+		if (this._toastT) clearTimeout(this._toastT);
+		this._toastT = null;
+		if (this._toastEl) this._toastEl.remove();
+		this._toastEl = null;
+	}
+
 	async toggleTouch() {
 		this.settings.touchEnabled = !this.settings.touchEnabled;
 		await this.saveSettings();
-		new Notice(this.settings.touchEnabled ? 'Scrollbar touch: on' : 'Scrollbar touch: off', 1500);
+		this.toast(this.settings.touchEnabled ? 'Scrollbar touch: on' : 'Scrollbar touch: off', 600);
+	}
+
+	async toggleHide() {
+		this.settings.hideScrollbar = !this.settings.hideScrollbar;
+		await this.saveSettings();
+		this.toast(this.settings.hideScrollbar ? 'Scrollbar hidden' : 'Scrollbar shown', 600);
+	}
+
+	// Tap = touch on / off (the button's own click). Long press = hide / show the whole scrollbar.
+	bindLongPress(btn) {
+		let timer = null;
+		let fired = false;
+		const clear = () => {
+			if (timer) clearTimeout(timer);
+			timer = null;
+		};
+		btn.addEventListener('pointerdown', () => {
+			fired = false;
+			clear();
+			timer = setTimeout(() => {
+				timer = null;
+				fired = true;
+				this.toggleHide();
+			}, 500);
+		});
+		for (const t of ['pointerup', 'pointerleave', 'pointercancel']) btn.addEventListener(t, clear);
+		// The release after a long press must not also count as a tap.
+		btn.addEventListener(
+			'click',
+			(e) => {
+				if (!fired) return;
+				fired = false;
+				e.preventDefault();
+				e.stopImmediatePropagation();
+			},
+			true
+		);
+		btn.addEventListener('contextmenu', (e) => e.preventDefault());
+	}
+
+	// Adds the small "eye with a slash" that pops into a round notch cut from the hand icon while
+	// the scrollbar is hidden. Both parts are drawn and animated by CSS (see styles.css).
+	decorateButton(btn) {
+		btn.addClass('nm-hand-btn');
+		const NS = 'http://www.w3.org/2000/svg';
+		const eye = document.createElement('span');
+		eye.className = 'nm-eye';
+		const svg = document.createElementNS(NS, 'svg');
+		svg.setAttribute('viewBox', '0 0 24 24');
+		svg.setAttribute('fill', 'none');
+		svg.setAttribute('stroke', 'currentColor');
+		svg.setAttribute('stroke-width', '2.6');
+		svg.setAttribute('stroke-linecap', 'round');
+		svg.setAttribute('stroke-linejoin', 'round');
+		const shape = document.createElementNS(NS, 'g');
+		shape.setAttribute('class', 'nm-eye-shape');
+		const outline = document.createElementNS(NS, 'path');
+		outline.setAttribute('d', 'M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z');
+		const pupil = document.createElementNS(NS, 'circle');
+		pupil.setAttribute('cx', '12');
+		pupil.setAttribute('cy', '12');
+		pupil.setAttribute('r', '3');
+		shape.appendChild(outline);
+		shape.appendChild(pupil);
+		const slash = document.createElementNS(NS, 'line');
+		slash.setAttribute('class', 'nm-eye-slash');
+		slash.setAttribute('x1', '3.5');
+		slash.setAttribute('y1', '3.5');
+		slash.setAttribute('x2', '20.5');
+		slash.setAttribute('y2', '20.5');
+		slash.setAttribute('pathLength', '1');
+		svg.appendChild(shape);
+		svg.appendChild(slash);
+		eye.appendChild(svg);
+		btn.appendChild(eye);
 	}
 
 	syncButtons(live) {
@@ -406,7 +565,10 @@ class NoteMinimapPlugin extends Plugin {
 		}
 		for (const view of live) {
 			if (!this.buttons.has(view)) {
-				this.buttons.set(view, view.addAction('hand', 'Scrollbar touch', () => this.toggleTouch()));
+				const btn = view.addAction('hand', 'Scrollbar touch', () => this.toggleTouch());
+				this.bindLongPress(btn);
+				this.decorateButton(btn);
+				this.buttons.set(view, btn);
 			}
 		}
 		for (const [view, btn] of Array.from(this.buttons.entries())) {
@@ -422,8 +584,16 @@ class NoteMinimapPlugin extends Plugin {
 	refreshButtons() {
 		const on = this.settings.touchEnabled;
 		for (const btn of this.buttons.values()) {
+			const k = on + '|' + this.settings.hideScrollbar;
+			if (btn._nmOn === k) continue;
+			btn._nmOn = k;
 			btn.toggleClass('is-active', on);
-			btn.setAttribute('aria-label', on ? 'Scrollbar touch: on (tap to turn off)' : 'Scrollbar touch: off (tap to turn on)');
+			btn.toggleClass('nm-strip-off', !!this.settings.hideScrollbar);
+			btn.setAttribute(
+				'aria-label',
+				(on ? 'Scrollbar touch: on (tap to turn off)' : 'Scrollbar touch: off (tap to turn on)') +
+					(this.settings.hideScrollbar ? ', scrollbar hidden (long-press to show)' : ', long-press to hide the scrollbar')
+			);
 		}
 	}
 
@@ -433,8 +603,23 @@ class NoteMinimapPlugin extends Plugin {
 	}
 
 	async saveSettings() {
-		await this.saveData(this.settings);
-		this.refreshAll();
+		this.queueRefresh();
+		this.saveDirty = true;
+		this.saveSoon();
+	}
+
+	flushSave() {
+		if (!this.saveDirty) return;
+		this.saveDirty = false;
+		return this.saveData(this.settings);
+	}
+
+	// Light refresh used while typing: only what depends on the note's text or height.
+	refreshContent() {
+		for (const [view, st] of Array.from(this.states.entries())) {
+			if (this.settings.style === 'scrollbar') this.updateViewport(st);
+			else this.update(view);
+		}
 	}
 
 	isExcluded(path) {
@@ -445,6 +630,7 @@ class NoteMinimapPlugin extends Plugin {
 	}
 
 	refreshAll() {
+		this._key = this.styleKey();
 		const live = new Set();
 		for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
 			const view = leaf.view;
@@ -517,16 +703,30 @@ class NoteMinimapPlugin extends Plugin {
 			repeatTimer: null,
 			repeat: null,
 			lead: false, // thumb follows the finger instantly while dragging it
+			lastWrite: null,
+			roContent: null,
+			rows: [],
+			renderKey: null,
+			boundMode: null,
 			barLast: 0,
 			barAcc: 0,
+			pressT: 0,
+			pressTimer: null,
+			holdOn: false,
+			vpQueued: false,
+			dead: false,
+			noScroll: null,
+			atTop: null,
+			atBottom: null,
 			ro: null,
 		};
 
-		st.onScroll = () => {
-			if (!st.running) this.updateViewport(st);
-		};
+		st.onScroll = () => this.queueViewport(st);
 		// If the finger or wheel scrolls the note itself, stop gliding and let it.
-		st.onUser = () => this.engineStop(st);
+		st.onUser = () => {
+			this.engineStop(st);
+			this.settleBars();
+		};
 		st.tick = (now) => this.tick(st, now);
 
 		const sbMode = () => this.settings.style === 'scrollbar';
@@ -581,7 +781,7 @@ class NoteMinimapPlugin extends Plugin {
 		el.addEventListener('pointermove', (e) => {
 			if (st.dragging && st.scroller) {
 				this.glide(st, targetFor(e), this.dragOmega());
-				this.updateViewport(st);
+				this.updateViewport(st, st.running ? st.pos : undefined);
 			}
 		});
 
@@ -593,11 +793,12 @@ class NoteMinimapPlugin extends Plugin {
 		};
 		el.addEventListener('pointerup', stop);
 		el.addEventListener('pointercancel', stop);
+		el.addEventListener('lostpointercapture', stop);
 
 		el.addEventListener(
 			'wheel',
 			(e) => {
-				this.bindScroller(view, st);
+				this.ensureScroller(view, st);
 				if (!st.scroller) return;
 				e.preventDefault();
 				// Lines / pages -> pixels, and cap a huge notch so one flick cannot teleport.
@@ -607,7 +808,10 @@ class NoteMinimapPlugin extends Plugin {
 			{ passive: false }
 		);
 
-		st.ro = new ResizeObserver(() => this.updateViewport(st));
+		st.ro = new ResizeObserver(() => {
+			st.mx = null;
+			if (!st.running) this.updateViewport(st); // while running, the next frame re-reads and redraws
+		});
 		st.ro.observe(host);
 
 		this.states.set(view, st);
@@ -617,12 +821,16 @@ class NoteMinimapPlugin extends Plugin {
 	detach(view) {
 		const st = this.states.get(view);
 		if (!st) return;
+		st.dead = true;
 		this.engineStop(st);
+		if (st.pressTimer) clearTimeout(st.pressTimer);
+		this.settleBars();
 		this.unbind(st);
 		if (st.ro) st.ro.disconnect();
 		st.el.remove();
 		st.host.removeClass('note-minimap-host', 'note-minimap-pad-left', 'note-minimap-pad-right');
 		st.host.style.removeProperty('--nm-width');
+		st.host.style.removeProperty('--nm-gutter');
 		this.states.delete(view);
 	}
 
@@ -630,6 +838,22 @@ class NoteMinimapPlugin extends Plugin {
 	// One critically damped spring drives every movement (taps, arrows, wheel,
 	// dragging). Retargeting keeps the current velocity, so quick repeated
 	// inputs blend together instead of restarting and stuttering.
+
+	// Layout reads (scrollHeight etc.) right after writing scrollTop force a synchronous layout.
+	// While the engine runs we read them at most every ~150 ms and reuse them between frames.
+	readMetrics(st, force) {
+		const sc = st.scroller;
+		const now = performance.now();
+		if (force || !st.mx || now - st.mx.t > 120) {
+			st.mx = {
+				sh: Math.max(1, sc.scrollHeight),
+				ch: sc.clientHeight,
+				mapH: st.el.clientHeight,
+				t: now,
+			};
+		}
+		return st.mx;
+	}
 
 	glideOmega() {
 		const ms = Math.max(80, this.settings.smoothMs);
@@ -643,7 +867,8 @@ class NoteMinimapPlugin extends Plugin {
 	glide(st, target, omega) {
 		const sc = st.scroller;
 		if (!sc) return;
-		const max = Math.max(0, sc.scrollHeight - sc.clientHeight);
+		const mx0 = this.readMetrics(st, !st.running);
+		const max = Math.max(0, mx0.sh - mx0.ch);
 		st.target = Math.min(max, Math.max(0, target));
 		st.omega = omega;
 
@@ -654,11 +879,13 @@ class NoteMinimapPlugin extends Plugin {
 			return;
 		}
 		if (!st.running) {
+			this.readMetrics(st, true);
 			st.pos = sc.scrollTop;
 			st.vel = 0;
 			st.barLast = st.pos;
 			st.barAcc = 0;
 			st.running = true;
+			st.lastWrite = st.pos;
 			st.lastT = performance.now();
 			st.raf = requestAnimationFrame(st.tick);
 		}
@@ -672,15 +899,34 @@ class NoteMinimapPlugin extends Plugin {
 		}
 		const dt = Math.min(0.034, Math.max(0.001, (now - st.lastT) / 1000));
 		st.lastT = now;
-		const max = Math.max(0, sc.scrollHeight - sc.clientHeight);
+
+		// CodeMirror re-measures line heights as new lines scroll into view and nudges scrollTop
+		// to keep the text steady. If we then write our own stale position, the note visibly
+		// jumps back. Notice any outside change and carry the spring along with it.
+		if (st.lastWrite !== undefined && st.lastWrite !== null) {
+			const drift = sc.scrollTop - st.lastWrite;
+			if (Math.abs(drift) > 1.5) {
+				st.pos += drift;
+				st.target += drift;
+				st.holdGoal += drift;
+				st.barLast += drift;
+				st.mx = null;
+			}
+		}
+		const mx = this.readMetrics(st);
+		const max = Math.max(0, mx.sh - mx.ch);
 
 		// Arrow held down: after a short delay the target starts moving, easing up to
 		// full speed. The spring is already moving from the first tap, so there is no
 		// stop-and-start between the tap and the hold.
 		if (st.hold) {
 			st.holdT += dt;
-			const u = clamp01(st.holdT / 0.4);
-			const ease = u * (2 - u); // quick to react, then settles into full speed
+			if (st.holdT > 0.35 && !st.holdOn) {
+				st.holdOn = true;
+				st.el.addClass('nm-holding');
+			}
+			const u = clamp01(st.holdT / 0.3);
+			const ease = u * u * (3 - 2 * u); // smoothstep: no sudden jolt as the hold ramps to full speed
 			st.target = Math.min(max, Math.max(0, st.target + st.hold * this.settings.holdSpeed * ease * dt));
 			const g = this.glideOmega();
 			st.omega = g + (Math.min(40, Math.max(22, g * 1.4)) - g) * ease;
@@ -711,6 +957,7 @@ class NoteMinimapPlugin extends Plugin {
 			st.raf = 0;
 			st.lead = false;
 			sc.scrollTop = st.pos;
+			st.lastWrite = null;
 			this.updateViewport(st);
 			this.trackBars(st, st.pos);
 			this.settleBars();
@@ -718,7 +965,8 @@ class NoteMinimapPlugin extends Plugin {
 		}
 
 		sc.scrollTop = st.pos;
-		this.updateViewport(st);
+		st.lastWrite = st.pos;
+		this.updateViewport(st, st.pos);
 		this.trackBars(st, st.pos);
 		st.raf = requestAnimationFrame(st.tick);
 	}
@@ -727,6 +975,7 @@ class NoteMinimapPlugin extends Plugin {
 		if (st.raf) cancelAnimationFrame(st.raf);
 		st.raf = 0;
 		st.running = false;
+		st.lastWrite = null;
 		st.vel = 0;
 		st.hold = 0;
 		st.lead = false;
@@ -734,7 +983,24 @@ class NoteMinimapPlugin extends Plugin {
 		if (st.repeat) clearInterval(st.repeat);
 		st.repeatTimer = null;
 		st.repeat = null;
-		if (st.el) st.el.removeClass('nm-press-up', 'nm-press-down');
+		if (st.pressTimer) clearTimeout(st.pressTimer);
+		st.pressTimer = null;
+		st.holdOn = false;
+		if (st.el) st.el.removeClass('nm-press-up', 'nm-press-down', 'nm-holding');
+	}
+
+	// Lets the pressed look finish: even a very quick tap shows the full press-and-release.
+	releasePress(st) {
+		if (!st.el) return;
+		if (st.pressTimer) clearTimeout(st.pressTimer);
+		const wait = Math.max(0, 260 - (performance.now() - st.pressT));
+		const done = () => {
+			st.pressTimer = null;
+			st.holdOn = false;
+			st.el.removeClass('nm-press-up', 'nm-press-down', 'nm-holding');
+		};
+		if (wait > 0) st.pressTimer = setTimeout(done, wait);
+		else done();
 	}
 
 	// Scroll by a relative amount; repeated calls add up while a glide is running.
@@ -750,7 +1016,14 @@ class NoteMinimapPlugin extends Plugin {
 		const sc = st.scroller;
 		if (!sc) return;
 		const step = this.settings.stepSize * dir;
-		if (st.el) st.el.addClass(dir < 0 ? 'nm-press-up' : 'nm-press-down');
+		if (st.pressTimer) clearTimeout(st.pressTimer);
+		st.pressTimer = null;
+		st.pressT = performance.now();
+		st.holdOn = false;
+		if (st.el) {
+			st.el.removeClass('nm-press-up', 'nm-press-down', 'nm-holding');
+			st.el.addClass(dir < 0 ? 'nm-press-up' : 'nm-press-down');
+		}
 
 		if (!this.settings.smooth) {
 			// No animation: step now, then repeat while the finger stays down.
@@ -784,11 +1057,16 @@ class NoteMinimapPlugin extends Plugin {
 			st.target = st.hold > 0 ? Math.max(st.target, goal) : Math.min(st.target, goal);
 		}
 		st.hold = 0; // the spring then eases the note to a soft stop
-		if (st.el) st.el.removeClass('nm-press-up', 'nm-press-down');
+		this.releasePress(st);
 	}
 
 	unbind(st) {
 		if (!st.scroller) return;
+		if (st.ro) {
+			st.ro.unobserve(st.scroller);
+			if (st.roContent) st.ro.unobserve(st.roContent);
+		}
+		st.roContent = null;
 		st.scroller.removeEventListener('scroll', st.onScroll);
 		st.scroller.removeEventListener('touchstart', st.onUser);
 		st.scroller.removeEventListener('wheel', st.onUser);
@@ -804,7 +1082,16 @@ class NoteMinimapPlugin extends Plugin {
 		return root.querySelector('.cm-scroller');
 	}
 
+	// Cheap check for hot paths (wheel): only look the scroller up again if the view changed mode
+	// or the element went away.
+	ensureScroller(view, st) {
+		const mode = view.getMode ? view.getMode() : '';
+		if (st.scroller && st.scroller.isConnected && st.boundMode === mode) return;
+		this.bindScroller(view, st);
+	}
+
 	bindScroller(view, st) {
+		st.boundMode = view.getMode ? view.getMode() : '';
 		const sc = this.findScroller(view);
 		if (sc === st.scroller) return;
 		this.engineStop(st);
@@ -815,13 +1102,30 @@ class NoteMinimapPlugin extends Plugin {
 			// frame we set scrollTop, which looks like stutter. Our spring does the easing.
 			st.prevBehavior = sc.style.scrollBehavior;
 			sc.style.scrollBehavior = 'auto';
+			if (st.ro) {
+				st.ro.observe(sc);
+				// The note's own height changes as lines are measured or rendered; the scroller's box does not.
+				st.roContent = sc.querySelector('.cm-content, .markdown-preview-sizer');
+				if (st.roContent) st.ro.observe(st.roContent);
+			}
 			sc.addEventListener('scroll', st.onScroll, { passive: true });
 			sc.addEventListener('touchstart', st.onUser, { passive: true });
 			sc.addEventListener('wheel', st.onUser, { passive: true });
 		}
 	}
 
-	render(view, st) {
+	// Everything that depends only on settings and device margins. Re-run only when one changes.
+	styleKey() {
+		const s = this.settings;
+		return [
+			s.style, s.side, s.touchEnabled, s.showArrows, s.hitWidth, s.thumbWidth, s.arrowSize,
+			s.thumbColor, s.thumbOpacity, s.shape, s.glow, s.glowColor, s.glowBlur, s.glowSpread,
+			s.glowOpacity, s.showTrack, s.width, s.top, s.height, s.hideScrollbar, s.holdSpeed,
+			this.inset('insetTop'), this.inset('insetBottom'), this.inset('insetEdge'),
+		].join('|');
+	}
+
+	applyStyle(view, st) {
 		const s = this.settings;
 		const sb = s.style === 'scrollbar';
 		const left = s.side === 'left';
@@ -829,21 +1133,32 @@ class NoteMinimapPlugin extends Plugin {
 		st.el.toggleClass('nm-scrollbar', sb);
 		st.el.toggleClass('nm-has-arrows', sb && s.showArrows && s.touchEnabled);
 		st.el.toggleClass('nm-touch-off', !s.touchEnabled);
-		if (!s.touchEnabled) {
+		st.el.toggleClass('nm-hidden', !!s.hideScrollbar);
+		if (!s.touchEnabled || s.hideScrollbar) {
 			this.engineStop(st);
 			st.dragging = false;
+			this.settleBars();
 		}
-		// A scrollbar-style strip is thin and overlays the edge, so it never reserves space.
-		st.host.toggleClass('note-minimap-pad-left', !sb && left);
-		st.host.toggleClass('note-minimap-pad-right', !sb && !left);
+		// The strip owns its own column: the note is padded away from it, so on a normal open
+		// nothing overlaps the scrollbar area (zooming is the only case that may).
+		// Hidden: give the note its full width back.
+		st.host.toggleClass('note-minimap-pad-left', left && !s.hideScrollbar);
+		st.host.toggleClass('note-minimap-pad-right', !left && !s.hideScrollbar);
 		st.el.toggleClass('note-minimap-left', left);
 		st.el.toggleClass('note-minimap-right', !left);
 
 		if (sb) {
+			// Bar width and touch area are independent settings that co-exist: the touch
+			// column is never narrower than the bar (plus its edge gap and a little air).
+			const hitW = this.touchWidth();
+			const edgeGap = this.inset('insetEdge');
 			st.host.style.removeProperty('--nm-width');
-			st.el.style.setProperty('--nm-width', Math.max(s.hitWidth, s.thumbWidth + 4) + 'px');
+			st.host.style.setProperty('--nm-gutter', hitW + edgeGap + 'px');
+			st.el.style.setProperty('--nm-width', hitW + 'px');
 			st.el.style.setProperty('--nm-thumb', s.thumbWidth + 'px');
+			st.el.style.setProperty('--nm-glyph', Math.min(20, Math.max(10, s.thumbWidth)) + 'px');
 			st.el.style.setProperty('--nm-arrow', s.arrowSize + 'px');
+			st.el.style.setProperty('--nm-flow', Math.round(Math.min(800, Math.max(300, 480000 / Math.max(1, s.holdSpeed)))) + 'ms');
 			st.el.style.setProperty('--nm-arrow-gap', (s.showArrows && s.touchEnabled ? s.arrowSize : 0) + 'px');
 			const color = s.thumbColor || 'var(--text-accent)';
 			const radius = { pill: '999px', rounded: '6px', square: '0px' }[s.shape] || '999px';
@@ -869,24 +1184,48 @@ class NoteMinimapPlugin extends Plugin {
 			st.el.style.setProperty('--nm-height', 'calc(100% - ' + (iTop + iBottom) + 'px)');
 			st.el.style.setProperty('--nm-edge', this.inset('insetEdge') + 'px');
 		} else {
+			st.host.style.removeProperty('--nm-gutter');
 			st.vpEl.style.removeProperty('transform');
 			st.vpEl.style.removeProperty('top');
 			st.vpEl.style.removeProperty('height');
+			st.lastVpH = null;
 			const w = s.width + '%';
 			st.host.style.setProperty('--nm-width', w);
 			st.el.style.setProperty('--nm-width', w);
-			st.el.style.setProperty('--nm-top', s.top + '%');
-			st.el.style.setProperty('--nm-height', s.height + '%');
+			// Same margins as the scrollbar, so the minimap never sits under the floating header or the
+			// bottom bar. Your top / height settings still apply wherever they leave more room.
+			const mTop = this.inset('insetTop');
+			const mBottom = this.inset('insetBottom');
+			const topCss = 'max(' + s.top + '%, ' + mTop + 'px)';
+			st.el.style.setProperty('--nm-top', topCss);
+			st.el.style.setProperty('--nm-height', 'min(' + s.height + '%, calc(100% - ' + topCss + ' - ' + mBottom + 'px))');
 		}
 
 		if (st.style !== s.style) {
 			st.style = s.style;
 			st.text = null;
 			st.stripH = 0;
+			st.lastVpH = null;
+			st.linesEl.style.removeProperty('transform');
+			this.clearLines(st);
+		}
+	}
+
+	render(view, st) {
+		const s = this.settings;
+		const sb = s.style === 'scrollbar';
+		const key = this._key;
+		const padCls = s.side === 'left' ? 'note-minimap-pad-left' : 'note-minimap-pad-right';
+		// Re-apply only if a setting changed, or something outside the plugin stripped our markup.
+		if (st.renderKey !== key || !st.el.isConnected || (!s.hideScrollbar && !st.host.classList.contains(padCls))) {
+			this.applyStyle(view, st);
+			st.renderKey = key;
 		}
 
-		if (sb) {
-			st.linesEl.empty();
+		if (s.hideScrollbar) {
+			// Hidden: nothing to draw. The bars are rebuilt on show if the note changed meanwhile.
+		} else if (sb) {
+			if (st.linesEl.firstChild) this.clearLines(st);
 		} else {
 			const text = view.getViewData();
 			if (text !== st.text) {
@@ -899,31 +1238,71 @@ class NoteMinimapPlugin extends Plugin {
 		this.updateViewport(st);
 	}
 
+	clearLines(st) {
+		st.linesEl.empty();
+		st.rows = [];
+	}
+
+	// Rows are kept between edits and only the ones whose look changed are touched, so typing in a
+	// long note updates a handful of nodes instead of tearing down and recreating thousands.
 	buildLines(st, items) {
 		const step = Math.max(1, Math.ceil(items.length / MAX_ROWS));
+		const rows = st.rows;
 		const frag = document.createDocumentFragment();
 		let row = 0;
 
 		for (let i = 0; i < items.length; i += step, row++) {
 			const it = items[i];
-			if (it.cls === 'nm-blank') continue;
+			const cur = rows[row];
+			if (it.cls === 'nm-blank') {
+				if (cur) {
+					cur.el.remove();
+					rows[row] = null;
+				}
+				continue;
+			}
+			const pct = Math.min(100, Math.max(8, (it.len / 80) * 100));
+			const left = it.indent ? Math.min(it.indent * 2, 16) : 0;
+			const sig = it.cls + '|' + pct + '|' + left;
+			if (cur) {
+				if (cur.sig === sig) continue;
+				cur.el.className = 'note-minimap-line ' + it.cls;
+				cur.el.style.setProperty('--nm-line-width', pct + '%');
+				cur.el.style.left = left ? left + 'px' : '';
+				cur.sig = sig;
+				continue;
+			}
 			const d = document.createElement('div');
 			d.className = 'note-minimap-line ' + it.cls;
-			d.style.setProperty('--nm-line-top', row * (LINE_H + GAP) + 'px');
-			d.style.setProperty('--nm-line-height', LINE_H + 'px');
-			const pct = Math.min(100, Math.max(8, (it.len / 80) * 100));
-			d.style.setProperty('--nm-line-width', pct + '%');
-			if (it.indent) d.style.left = Math.min(it.indent * 2, 16) + 'px';
+			d.style.cssText =
+				'--nm-line-top:' + row * (LINE_H + GAP) + 'px;--nm-line-width:' + pct + '%' + (left ? ';left:' + left + 'px' : '');
 			frag.appendChild(d);
+			rows[row] = { el: d, sig };
 		}
 
-		st.linesEl.empty();
+		// The note got shorter: drop the rows past the end.
+		for (let r = row; r < rows.length; r++) if (rows[r]) rows[r].el.remove();
+		rows.length = row;
+
 		st.linesEl.appendChild(frag);
 		st.stripH = Math.ceil(items.length / step) * (LINE_H + GAP);
 		st.linesEl.style.setProperty('--nm-strip-height', st.stripH + 'px');
+		// Every bar has the same height, so it is set once on the container and inherited.
+		st.linesEl.style.setProperty('--nm-line-height', LINE_H + 'px');
 	}
 
-	updateViewport(st) {
+	// Native scrolling (finger on the note, wheel, keyboard) can fire faster than the screen
+	// refreshes. Redraw the thumb once per frame; the engine already redraws every frame itself.
+	queueViewport(st) {
+		if (st.vpQueued || st.running) return;
+		st.vpQueued = true;
+		requestAnimationFrame(() => {
+			st.vpQueued = false;
+			if (!st.dead && !st.running) this.updateViewport(st);
+		});
+	}
+
+	updateViewport(st, livePos) {
 		const sc = st.scroller;
 		const s = this.settings;
 		const sb = s.style === 'scrollbar';
@@ -932,7 +1311,9 @@ class NoteMinimapPlugin extends Plugin {
 			return;
 		}
 
-		const mapH = st.el.clientHeight;
+		const live = livePos !== undefined;
+		const mx = live ? this.readMetrics(st) : null;
+		const mapH = live ? mx.mapH : st.el.clientHeight;
 		if (sb) st.stripH = mapH;
 		if (!st.stripH) {
 			st.vpEl.style.display = 'none';
@@ -940,11 +1321,11 @@ class NoteMinimapPlugin extends Plugin {
 		}
 		st.vpEl.style.display = '';
 
-		const sh = Math.max(1, sc.scrollHeight);
-		const ch = sc.clientHeight;
+		const sh = live ? mx.sh : Math.max(1, sc.scrollHeight);
+		const ch = live ? mx.ch : sc.clientHeight;
 		const maxScroll = Math.max(1, sh - ch);
 		// While you drag the thumb it stays glued to your finger; the note catches up.
-		const shown = sb && st.lead ? st.target : sc.scrollTop;
+		const shown = sb && st.lead ? st.target : live ? livePos : sc.scrollTop;
 		const frac = Math.min(1, Math.max(0, shown / maxScroll));
 		const e = st.el.style;
 
@@ -959,10 +1340,28 @@ class NoteMinimapPlugin extends Plugin {
 			st.stripTop = 0;
 			st.vpH = vpH;
 			st.vpTop = vpTop;
+			const atTop = shown <= 1;
+			const atBottom = shown >= maxScroll - 1;
+			if (atTop !== st.atTop) {
+				st.atTop = atTop;
+				st.el.toggleClass('nm-at-top', atTop);
+			}
+			if (atBottom !== st.atBottom) {
+				st.atBottom = atBottom;
+				st.el.toggleClass('nm-at-bottom', atBottom);
+			}
+			const noScroll = sh <= ch + 1;
+			if (noScroll !== st.noScroll) {
+				st.noScroll = noScroll;
+				st.el.toggleClass('nm-no-scroll', noScroll);
+			}
 			// Move the thumb with a GPU transform; it stays perfectly in step with the note.
 			const v = st.vpEl.style;
-			v.top = '0px';
-			v.height = vpH + 'px';
+			if (st.lastVpH !== vpH) {
+				st.lastVpH = vpH;
+				v.top = '0px';
+				v.height = vpH + 'px';
+			}
 			v.transform = 'translate3d(0,' + vpTop + 'px,0)';
 			return;
 		}
@@ -970,15 +1369,25 @@ class NoteMinimapPlugin extends Plugin {
 		const overflow = Math.max(0, st.stripH - mapH);
 		st.stripTop = -frac * overflow;
 
-		const vpTop = (sc.scrollTop / sh) * st.stripH + st.stripTop;
+		const vpTop = ((live ? livePos : sc.scrollTop) / sh) * st.stripH + st.stripTop;
 		const vpH = Math.max(4, Math.min(st.stripH, (ch / sh) * st.stripH));
 		st.vpH = vpH;
 
-		e.setProperty('--nm-strip-top', st.stripTop + 'px');
-		e.setProperty('--nm-vp-top', vpTop + 'px');
-		e.setProperty('--nm-vp-height', vpH + 'px');
-		e.setProperty('--nm-fade-top', vpTop + 'px');
-		e.setProperty('--nm-fade-bot', vpTop + vpH + 'px');
+		// Custom properties set on the strip are inherited by every bar (up to 3000), so changing
+		// them each frame would restyle all of them. Transforms on the two moving parts do not.
+		st.linesEl.style.transform = 'translate3d(0,' + st.stripTop + 'px,0)';
+		const v = st.vpEl.style;
+		if (st.lastVpH !== vpH) {
+			st.lastVpH = vpH;
+			v.top = '0px';
+			v.height = vpH + 'px';
+		}
+		v.transform = 'translate3d(0,' + vpTop + 'px,0)';
+		// The fade mask only exists while the strip is being dragged.
+		if (st.dragging) {
+			e.setProperty('--nm-fade-top', vpTop + 'px');
+			e.setProperty('--nm-fade-bot', vpTop + vpH + 'px');
+		}
 	}
 }
 
@@ -1004,8 +1413,18 @@ class MinimapSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName('Hide scrollbar')
+			.setDesc('Hide the whole scrollbar or minimap and give the note its full width. Same as long-pressing the header button.')
+			.addToggle((t) =>
+				t.setValue(p.settings.hideScrollbar).onChange(async (v) => {
+					p.settings.hideScrollbar = v;
+					await p.saveSettings();
+				})
+			);
+
+		new Setting(containerEl)
 			.setName('Header button')
-			.setDesc('Show a hand button in the note header (next to the Reading view icon) to turn the touch area on and off. If the header is full, it may appear inside the three-dot menu instead.')
+			.setDesc('Show a hand button in the note header (next to the Reading view icon) to turn the touch area on and off. Long-press it to hide or show the whole scrollbar. If the header is full, it may appear inside the three-dot menu instead.')
 			.addToggle((t) =>
 				t.setValue(p.settings.touchButton).onChange(async (v) => {
 					p.settings.touchButton = v;
@@ -1015,7 +1434,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Style')
-			.setDesc('Scrollbar: a thin draggable bar that looks like the normal scrollbar. Minimap: the colour-coded overview.')
+			.setDesc('Scrollbar: a thin draggable bar that looks like the normal scrollbar. Minimap: the colour-coded overview (very demanding, so it may lag on long notes).')
 			.addDropdown((d) =>
 				d
 					.addOption('scrollbar', 'Scrollbar')
@@ -1042,23 +1461,32 @@ class MinimapSettingTab extends PluginSettingTab {
 					})
 			);
 
-		const slider = (name, desc, key, min, max, step) =>
+		const comps = {};
+		const slider = (name, desc, key, min, max, step, adjust) =>
 			new Setting(containerEl)
 				.setName(name)
 				.setDesc(desc)
-				.addSlider((sl) =>
+				.addSlider((sl) => {
+					comps[key] = sl;
 					sl
 						.setLimits(min, max, step)
 						.setValue(typeof p.settings[key] === 'number' ? p.settings[key] : p.inset(key))
 						.setDynamicTooltip()
 						.onChange(async (v) => {
 							p.settings[key] = v;
+							if (adjust) adjust(v);
 							await p.saveSettings();
-						})
-				);
+						});
+				});
 
 		if (p.settings.style === 'scrollbar') {
-			slider('Bar width', 'Width of the visible scrollbar, in pixels.', 'thumbWidth', 6, 40, 1);
+			slider('Bar width', 'Width of the visible scrollbar, in pixels. The touch area below grows with it if it would otherwise be too narrow.', 'thumbWidth', 6, 40, 1, () => {
+				const need = p.settings.thumbWidth + 6;
+				if (p.settings.hitWidth < need) {
+					p.settings.hitWidth = need;
+					if (comps.hitWidth) comps.hitWidth.setValue(need);
+				}
+			});
 			new Setting(containerEl)
 				.setName('Shape')
 				.setDesc('Corner style of the scrollbar thumb.')
@@ -1074,8 +1502,6 @@ class MinimapSettingTab extends PluginSettingTab {
 						})
 				);
 
-			let picker = null;
-			let hexInput = null;
 			this.addColorSetting(containerEl, {
 				name: 'Colour',
 				desc: 'Thumb colour. Type a hex code (like #d19a66) or use the picker. Empty follows your theme accent.',
@@ -1143,11 +1569,17 @@ class MinimapSettingTab extends PluginSettingTab {
 			slider('Top margin', 'Shortens the scrollbar from the top, so a camera cut-out or rounded corner does not cover the arrow.', 'insetTop', 0, 240, 2);
 			slider('Bottom margin', 'Shortens the scrollbar from the bottom, so the gesture bar or a rounded corner does not cover the arrow.', 'insetBottom', 0, 240, 2);
 			slider('Edge margin', 'Moves the scrollbar in from the side of the screen, away from curved edges, in pixels.', 'insetEdge', 0, 60, 1);
-			slider('Touch area', 'Width of the invisible strip that grabs your finger, in pixels. Bigger is easier to hit.', 'hitWidth', 20, 140, 2);
+			slider('Touch area', 'Width of the scrollbar column that grabs your finger, in pixels. The bar sits inside it and the note is kept clear of it, so nothing overlaps. It is never narrower than the bar.', 'hitWidth', 20, 140, 2, (v) => {
+				const need = p.settings.thumbWidth + 6;
+				if (v < need) {
+					p.settings.hitWidth = need;
+					if (comps.hitWidth) comps.hitWidth.setValue(need);
+				}
+			});
 
 			new Setting(containerEl)
 				.setName('Arrow buttons')
-				.setDesc('Add up and down arrows at the ends of the scrollbar. Tap to step, hold to keep scrolling.')
+				.setDesc('Add up and down arrows at the ends of the scrollbar. Tap an arrow to step one page-chunk, hold it to keep scrolling (it speeds up the longer you hold). While pressed, the arrow glides into a pill highlight and returns when released.')
 				.addToggle((t) =>
 					t.setValue(p.settings.showArrows).onChange(async (v) => {
 						p.settings.showArrows = v;
@@ -1184,10 +1616,7 @@ class MinimapSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(p.settings.animateBars).onChange(async (v) => {
 					p.settings.animateBars = v;
-					if (!v) {
-						p.setBars(false);
-						document.body.removeClass('nm-animate-bars');
-					}
+					if (!v) p.releaseBars();
 					await p.saveSettings();
 				})
 			);
@@ -1234,28 +1663,67 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		setting.addText((t) => {
 			text = t;
-			t.inputEl.addClass('nm-hex-input');
+			const el = t.inputEl;
+			el.addClass('nm-hex-input');
+			// Stop the keyboard from "helping": no suggestions, no auto-correct, no capitals.
+			el.setAttribute('autocomplete', 'off');
+			el.setAttribute('autocorrect', 'off');
+			el.setAttribute('autocapitalize', 'off');
+			el.setAttribute('spellcheck', 'false');
+			el.setAttribute('maxlength', '7');
+			el.setAttribute('enterkeyhint', 'done');
+
+			const apply = async (hex) => {
+				el.removeClass('nm-input-error');
+				p.settings[key] = hex;
+				if (picker) picker.setValue(hex);
+				markSelected();
+				await p.saveSettings();
+			};
+
+			// Typing never rewrites what you typed. Only a complete 6-digit code is applied
+			// while typing; a short code like "cac" is left alone until you finish (blur / Enter).
 			t.setPlaceholder(fallback)
 				.setValue(p.settings[key] || '')
 				.onChange(async (v) => {
-					if (v.trim() === '') {
-						t.inputEl.removeClass('nm-input-error');
+					const raw = v.trim();
+					if (raw === '') {
+						el.removeClass('nm-input-error');
 						p.settings[key] = '';
 						markSelected();
 						await p.saveSettings();
 						return;
 					}
-					const hex = normalizeHex(v);
-					if (!hex) {
-						t.inputEl.addClass('nm-input-error');
+					const body = raw.replace(/^#/, '');
+					if (!/^[0-9a-fA-F]*$/.test(body) || body.length > 6) {
+						el.addClass('nm-input-error');
 						return;
 					}
-					t.inputEl.removeClass('nm-input-error');
-					p.settings[key] = hex;
-					if (picker) picker.setValue(hex);
-					markSelected();
-					await p.saveSettings();
+					if (body.length === 6) {
+						await apply('#' + body.toLowerCase());
+						return;
+					}
+					el.removeClass('nm-input-error'); // still typing
 				});
+
+			const finish = async () => {
+				const raw = el.value.trim();
+				if (raw === '') return;
+				const hex = normalizeHex(raw);
+				if (!hex) {
+					el.addClass('nm-input-error');
+					return;
+				}
+				el.value = hex; // 3-digit shorthand is expanded only now
+				await apply(hex);
+			};
+			el.addEventListener('blur', finish);
+			el.addEventListener('keydown', (e) => {
+				if (e.key === 'Enter') {
+					e.preventDefault();
+					el.blur();
+				}
+			});
 		});
 
 		setting.addColorPicker((c) => {
@@ -1292,13 +1760,12 @@ class MinimapSettingTab extends PluginSettingTab {
 			if (picker && hex) picker.setValue(hex);
 			markSelected();
 			await p.saveSettings();
-			p.refreshAll();
-			new Notice(name + ': ' + (hex || 'follows theme accent'), 1500);
+			p.toast(name + ': ' + (hex || 'follows theme accent'), 700);
 		};
 
 		const sw = new Setting(containerEl)
 			.setName(name + ' quick picks')
-			.setDesc('Colours taken from your current theme, so they change when your theme or wallpaper accent does. Tap one to use it. (build 1.3.2)');
+			.setDesc('Colours taken from your current theme, so they change when your theme or wallpaper accent does. Tap one to use it.');
 		sw.settingEl.addClass('nm-swatch-setting');
 		lockStyle(sw.settingEl, { 'flex-direction': 'column', 'align-items': 'stretch', gap: '8px' });
 		lockStyle(sw.controlEl, {
