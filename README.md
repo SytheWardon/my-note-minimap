@@ -40,7 +40,12 @@ You can also switch it under Settings → My Note Minimap → *Touch controls*, 
 
 ## Performance
 
-The **scrollbar** style is light and smooth. The **minimap** style is very demanding: it draws a bar for every line of the note (up to 3000), so it might lag, especially on long notes and on phones. If you notice stutter, switch back to the scrollbar style under Settings → My Note Minimap → *Style*. Possible fixes for the minimap's performance are planned for future updates.
+The **scrollbar** style is light and smooth. The **minimap** style is very demanding: it draws a bar for every line of the note (up to 3000), so it might lag, especially on long notes and on phones. If you notice stutter, switch back to the scrollbar style under Settings → My Note Minimap → *Style*. To make the minimap lighter on long notes, use **Fast rendering** (Settings → My Note Minimap; on by default). It only affects the minimap style, and nothing about how the note or the strip looks changes:
+
+- **Minimap on one canvas:** instead of a `<div>` for each of up to 3000 lines, the minimap keeps the line data in an array and paints only the bars in view on a single canvas. The cost no longer grows with the length of the note. (Custom CSS that recolours the individual bars does not apply to the canvas.)
+- **Gentler refresh while typing:** the minimap waits about 0.8 s after you stop typing (instead of 0.3 s) before rebuilding, and notes in background tabs are rebuilt when you switch back to them rather than while you type in another one.
+
+The scrollbar style is already light, so Fast rendering has no effect on it.
 
 ## What's new in 1.4.0
 

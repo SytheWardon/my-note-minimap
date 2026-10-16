@@ -44,36 +44,49 @@
 }
 
 /* Long-press on the header button hides the whole strip. */
-.note-minimap.nm-hidden {
-	display: none !important;
+.note-minimap-host .note-minimap.nm-hidden {
+	display: none;
 }
 
 /* Touch switched off: display-only, touches fall through to the note. */
 .note-minimap.nm-touch-off,
 .note-minimap.nm-touch-off * {
-	pointer-events: none !important;
+	pointer-events: none;
 }
 
+.note-minimap.nm-scrollbar.nm-has-arrows.nm-touch-off .nm-arrow,
 .note-minimap.nm-touch-off .nm-arrow {
-	display: none !important;
+	display: none;
 }
 
-/* ---- Minimap style ---- */
-.note-minimap.note-minimap-dragging .note-minimap-lines {
-	--nm-mask: linear-gradient(
-		to bottom,
-		rgba(0, 0, 0, 0.15) 0,
-		rgba(0, 0, 0, 0.15) calc(var(--nm-fade-top, 0px) - var(--nm-fade-band, 40px)),
-		black var(--nm-fade-top, 0px),
-		black var(--nm-fade-bot, 100%),
-		rgba(0, 0, 0, 0.15) calc(var(--nm-fade-bot, 0px) + var(--nm-fade-band, 40px)),
-		rgba(0, 0, 0, 0.15) 100%
-	);
-	-webkit-mask-image: var(--nm-mask);
-	mask-image: var(--nm-mask);
+/* ---- Minimap style ----
+   While dragging, everything outside the visible band is dimmed by two background-coloured
+   overlays (no CSS masks). --nm-fade-top / --nm-fade-bot are set on the strip by the script. */
+.note-minimap.note-minimap-dragging::before,
+.note-minimap.note-minimap-dragging::after {
+	content: "";
+	position: absolute;
+	left: 0;
+	right: 0;
+	z-index: 2;
+	pointer-events: none;
 }
 
-/* Moved with a transform; its own layer keeps the masked fade from flickering. contain keeps
+.note-minimap.note-minimap-dragging::before {
+	top: 0;
+	height: var(--nm-fade-top, 0px);
+	background: var(--background-primary);
+	opacity: 0.85;
+}
+
+.note-minimap.note-minimap-dragging::after {
+	top: var(--nm-fade-bot, 100%);
+	bottom: 0;
+	background: var(--background-primary);
+	opacity: 0.85;
+}
+
+/* Moved with a transform; its own layer keeps the dimming overlays from flickering. contain keeps
    the thousands of bars from restyling anything outside the strip. */
 .note-minimap-lines {
 	position: absolute;
@@ -121,6 +134,17 @@
 .note-minimap-line.nm-hr { background: #d19a66; opacity: 0.7; }
 .note-minimap-line.nm-em { background: #e5c07b; opacity: 0.6; }
 .note-minimap-line.nm-frontmatter { background: #9aa5b1; opacity: 0.75; }
+
+/* ---- Fast rendering ---- */
+/* The canvas minimap: one element that fills the strip, painted from script. */
+.note-minimap-canvas {
+	position: absolute;
+	left: 0;
+	top: 0;
+	width: 100%;
+	height: 100%;
+	pointer-events: none;
+}
 
 /* ---- Scrollbar style: a thin overlay bar that behaves like a native scrollbar ---- */
 .note-minimap.nm-scrollbar {
@@ -351,20 +375,20 @@
 }
 
 /* ---- Top header and bottom bar: ease in and out while the strip scrolls the note ---- */
-body.nm-animate-bars .mobile-navbar,
-body.nm-animate-bars .view-header {
-	transition: transform 0.45s cubic-bezier(0.22, 0.9, 0.25, 1), opacity 0.35s ease !important;
+html body.nm-animate-bars.nm-animate-bars .mobile-navbar,
+html body.nm-animate-bars.nm-animate-bars .view-header {
+	transition: transform 0.45s cubic-bezier(0.22, 0.9, 0.25, 1), opacity 0.35s ease;
 }
 
-body.nm-animate-bars.nm-bars-hidden .mobile-navbar {
-	transform: translateY(calc(100% + 28px)) !important;
-	opacity: 0 !important;
+html body.nm-animate-bars.nm-bars-hidden .mobile-navbar {
+	transform: translateY(calc(100% + 28px));
+	opacity: 0;
 	pointer-events: none;
 }
 
-body.nm-animate-bars.nm-bars-hidden .view-header {
-	transform: translateY(calc(-100% - 28px)) !important;
-	opacity: 0 !important;
+html body.nm-animate-bars.nm-bars-hidden .view-header {
+	transform: translateY(calc(-100% - 28px));
+	opacity: 0;
 	pointer-events: none;
 }
 
@@ -373,27 +397,20 @@ body.nm-animate-bars.nm-bars-hidden .view-header {
 	color: var(--text-accent);
 }
 
-@property --nm-cut {
-	syntax: '<length>';
-	inherits: false;
-	initial-value: -1px;
-}
-
 .nm-hand-btn {
 	position: relative;
 	--nm-s: var(--icon-size, 18px);
 }
 
-/* A circular piece is cut out of the hand's bottom right; the notch grows from nothing. */
-.nm-hand-btn > svg.svg-icon {
-	--nm-cut: -1px;
-	-webkit-mask-image: radial-gradient(circle at 80% 80%, transparent var(--nm-cut), #000 calc(var(--nm-cut) + 0.6px));
-	mask-image: radial-gradient(circle at 80% 80%, transparent var(--nm-cut), #000 calc(var(--nm-cut) + 0.6px));
-	transition: --nm-cut 0.4s cubic-bezier(0.34, 1.45, 0.64, 1);
+/* A round piece is cut out of the hand's bottom right through an SVG <mask> added by the script;
+   the notch grows from nothing by animating the radius of the mask's circle. */
+.nm-hand-btn .nm-notch {
+	r: 0;
+	transition: r 0.4s cubic-bezier(0.34, 1.45, 0.64, 1);
 }
 
-.nm-hand-btn.nm-strip-off > svg.svg-icon {
-	--nm-cut: calc(var(--nm-s) * 0.25 + 1.3px);
+.nm-hand-btn.nm-strip-off .nm-notch {
+	r: 7.7px;
 }
 
 /* The eye sits in the notch: it pops in, the slash is drawn across it, and it blinks once. */
@@ -480,19 +497,19 @@ body.nm-animate-bars.nm-bars-hidden .view-header {
 
 /* ---- Reduced motion ---- */
 @media (prefers-reduced-motion: reduce) {
-	.note-minimap.nm-scrollbar .nm-arrow::before,
-	.note-minimap.nm-scrollbar .nm-arrow::after {
-		transition-duration: 0.01s !important;
-		animation: none !important;
+	.note-minimap.note-minimap.note-minimap.note-minimap.note-minimap.note-minimap.nm-scrollbar .nm-arrow::before,
+	.note-minimap.note-minimap.note-minimap.note-minimap.note-minimap.note-minimap.nm-scrollbar .nm-arrow::after {
+		transition-duration: 0.01s;
+		animation: none;
 	}
 
-	body.nm-animate-bars .mobile-navbar,
-	body.nm-animate-bars .view-header,
-	.nm-hand-btn > svg.svg-icon,
-	.nm-eye,
-	.nm-eye-slash {
-		transition-duration: 0.01s !important;
-		transition-delay: 0s !important;
+	html body.nm-animate-bars.nm-animate-bars .mobile-navbar,
+	html body.nm-animate-bars.nm-animate-bars .view-header,
+	.nm-hand-btn .nm-notch,
+	.nm-hand-btn .nm-eye,
+	.nm-hand-btn .nm-eye-slash {
+		transition-duration: 0.01s;
+		transition-delay: 0s;
 	}
 
 	.nm-hand-btn.nm-strip-off .nm-eye-shape {
@@ -553,8 +570,8 @@ body.nm-animate-bars.nm-bars-hidden .view-header {
 	align-items: center;
 	justify-content: center;
 	box-sizing: border-box;
-	flex: 0 0 auto !important;
-	width: 64px !important;
+	flex: 0 0 auto;
+	width: 64px;
 	min-width: 64px;
 	max-width: 64px;
 	height: 36px;

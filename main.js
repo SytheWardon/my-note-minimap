@@ -4,7 +4,7 @@ const { Plugin, MarkdownView, PluginSettingTab, Setting, Platform, Notice, debou
 
 const DEFAULTS = {
 	style: 'scrollbar', // 'scrollbar' or 'minimap'
-	thumbWidth: 18, // px, visible thumb
+	thumbWidth: null, // px, visible thumb. null = automatic: 14 on a typical phone, nudged a little up or down with screen size
 	hitWidth: 64, // px, invisible touch area around the thumb
 	thumbColor: '', // '' = theme accent colour
 	thumbOpacity: 0.75,
@@ -34,6 +34,7 @@ const DEFAULTS = {
 	top: 5, // % from the top of the note
 	height: 60, // % of the note height
 	hideOnMobile: false,
+	fastRender: true, // faster minimap: painted on one canvas, and refreshed more gently while you type
 	exclusions: [],
 };
 
@@ -41,6 +42,25 @@ const DESKTOP_INSETS = { insetTop: 0, insetBottom: 0, insetEdge: 0 };
 const LINE_H = 2; // px per bar
 const GAP = 1; // px between bars
 const MAX_ROWS = 3000; // very long notes are sampled
+const ROW = LINE_H + GAP; // px from one bar to the next
+
+// Fast rendering draws the minimap on one canvas, so the bar colours live here instead of in CSS.
+// [colour, opacity]; a null colour means the theme's normal text colour.
+const MAP_STYLE = {
+	'nm-text': [null, 0.35],
+	'nm-h1': ['#e06c75', 1],
+	'nm-h2': ['#d19a66', 1],
+	'nm-h3': ['#e5c07b', 1],
+	'nm-h4': ['#98c379', 1],
+	'nm-h5': ['#56b6c2', 1],
+	'nm-h6': ['#61afef', 1],
+	'nm-code': ['#61afef', 0.55],
+	'nm-quote': ['#c678dd', 0.6],
+	'nm-list': ['#98c379', 0.6],
+	'nm-hr': ['#d19a66', 0.7],
+	'nm-em': ['#e5c07b', 0.6],
+	'nm-frontmatter': ['#9aa5b1', 0.75],
+};
 
 // Turns note text into one descriptor per line (class + length + indent).
 function classify(text) {
@@ -276,7 +296,10 @@ class NoteMinimapPlugin extends Plugin {
 		if ((saved.ver || 1) < 4) {
 			for (const k of ['insetTop', 'insetBottom', 'insetEdge']) if (saved[k] === 0) this.settings[k] = null;
 		}
-		this.settings.ver = 4;
+		// v5: bar width defaults to "automatic" (14, scaled gently per device). The old fixed
+		// defaults (18, or 14 saved as a number) become automatic; any other value you chose is kept.
+		if ((saved.ver || 1) < 5 && (saved.thumbWidth === 18 || saved.thumbWidth === 14)) this.settings.thumbWidth = null;
+		this.settings.ver = 5;
 		this.states = new Map();
 		this._unloaded = false;
 		this._refreshQueued = false;
@@ -292,7 +315,10 @@ class NoteMinimapPlugin extends Plugin {
 		// pane). Run one refresh after they have all fired instead of one per event.
 		const refresh = () => this.queueRefresh();
 		// Typing only needs the minimap lines (or the thumb size) refreshed, not every setting re-applied.
-		const refreshSoon = debounce(() => this.refreshContent(), 300, true);
+		// Fast rendering waits a little longer after you stop typing, so a burst of edits costs one rebuild.
+		const refreshSoonNormal = debounce(() => this.refreshContent(), 300, true);
+		const refreshSoonFast = debounce(() => this.refreshContent(), 800, true);
+		const refreshSoon = () => (this.settings.fastRender ? refreshSoonFast() : refreshSoonNormal());
 
 		this.registerEvent(this.app.workspace.on('layout-change', refresh));
 		this.registerEvent(this.app.workspace.on('active-leaf-change', () => {
@@ -304,6 +330,12 @@ class NoteMinimapPlugin extends Plugin {
 			refresh();
 		}));
 		this.registerEvent(this.app.workspace.on('editor-change', refreshSoon));
+		// A theme or colour-scheme change: the canvas minimap has to pick up the new text colour.
+		this.registerEvent(this.app.workspace.on('css-change', () => {
+			this._mapText = null;
+			for (const st of this.states.values()) st.mapDirty = true;
+			this.queueRefresh();
+		}));
 		this.app.workspace.onLayoutReady(refresh);
 
 		// A rotation or a window resize can change the safe areas, so re-measure.
@@ -373,9 +405,21 @@ class NoteMinimapPlugin extends Plugin {
 		return this._dev;
 	}
 
+	// Visible bar width: your own value, or the automatic one. Automatic is 14 px, scaled by the
+	// screen's long side relative to a 868 px phone and held to 0.85x - 1.2x (about 12 - 17 px),
+	// so it adapts per device without ever getting thin or chunky. Desktop stays at 14.
+	barWidth() {
+		const v = this.settings.thumbWidth;
+		if (typeof v === 'number') return v;
+		if (!Platform.isMobile) return 14;
+		const long = Math.max(screen.width || 0, screen.height || 0);
+		const scale = long >= 480 ? Math.min(1.2, Math.max(0.85, long / 868)) : 1;
+		return Math.round(14 * scale);
+	}
+
 	// Width of the touch column: your setting, but never narrower than the bar needs.
 	touchWidth() {
-		return Math.max(this.settings.hitWidth, this.settings.thumbWidth + 6);
+		return Math.max(this.settings.hitWidth, this.barWidth() + 6);
 	}
 
 	// The margin actually in use: your own value, or this device's automatic one.
@@ -556,6 +600,40 @@ class NoteMinimapPlugin extends Plugin {
 		svg.appendChild(slash);
 		eye.appendChild(svg);
 		btn.appendChild(eye);
+		this.addNotch(btn);
+	}
+
+	// Cuts a round notch from the hand icon with an SVG <mask>; CSS only animates its radius.
+	addNotch(btn) {
+		const icon = btn.querySelector('svg.svg-icon');
+		if (!icon) return;
+		const NS = 'http://www.w3.org/2000/svg';
+		const id = 'nm-notch-' + Math.random().toString(36).slice(2, 9);
+		const defs = document.createElementNS(NS, 'defs');
+		const mask = document.createElementNS(NS, 'mask');
+		mask.setAttribute('id', id);
+		mask.setAttribute('maskUnits', 'userSpaceOnUse');
+		mask.setAttribute('x', '0');
+		mask.setAttribute('y', '0');
+		mask.setAttribute('width', '24');
+		mask.setAttribute('height', '24');
+		const full = document.createElementNS(NS, 'rect');
+		full.setAttribute('width', '24');
+		full.setAttribute('height', '24');
+		full.setAttribute('fill', '#fff');
+		const hole = document.createElementNS(NS, 'circle');
+		hole.setAttribute('class', 'nm-notch');
+		hole.setAttribute('cx', '19.2');
+		hole.setAttribute('cy', '19.2');
+		hole.setAttribute('fill', '#000');
+		mask.appendChild(full);
+		mask.appendChild(hole);
+		defs.appendChild(mask);
+		const g = document.createElementNS(NS, 'g');
+		g.setAttribute('mask', 'url(#' + id + ')');
+		while (icon.firstChild) g.appendChild(icon.firstChild);
+		icon.appendChild(defs);
+		icon.appendChild(g);
 	}
 
 	syncButtons(live) {
@@ -618,6 +696,9 @@ class NoteMinimapPlugin extends Plugin {
 	refreshContent() {
 		for (const [view, st] of Array.from(this.states.entries())) {
 			if (this.settings.style === 'scrollbar') this.updateViewport(st);
+			// Fast rendering: a note in a background tab is rebuilt when it is shown again, not while
+			// you type in another one.
+			else if (this.settings.fastRender && view.containerEl.offsetParent === null) continue;
 			else this.update(view);
 		}
 	}
@@ -706,6 +787,15 @@ class NoteMinimapPlugin extends Plugin {
 			lastWrite: null,
 			roContent: null,
 			rows: [],
+			items: null, // classified lines, kept for the canvas minimap
+			step: 1,
+			canvas: null,
+			ctx: null,
+			cvW: 0,
+			cvDirty: true, // canvas needs resizing
+			mapDirty: true, // canvas needs redrawing
+			drawnTop: null,
+			drawnH: 0,
 			renderKey: null,
 			boundMode: null,
 			barLast: 0,
@@ -810,6 +900,7 @@ class NoteMinimapPlugin extends Plugin {
 
 		st.ro = new ResizeObserver(() => {
 			st.mx = null;
+			st.cvDirty = true;
 			if (!st.running) this.updateViewport(st); // while running, the next frame re-reads and redraws
 		});
 		st.ro.observe(host);
@@ -1118,7 +1209,7 @@ class NoteMinimapPlugin extends Plugin {
 	styleKey() {
 		const s = this.settings;
 		return [
-			s.style, s.side, s.touchEnabled, s.showArrows, s.hitWidth, s.thumbWidth, s.arrowSize,
+			s.style, s.side, s.touchEnabled, s.showArrows, s.hitWidth, this.barWidth(), s.arrowSize,
 			s.thumbColor, s.thumbOpacity, s.shape, s.glow, s.glowColor, s.glowBlur, s.glowSpread,
 			s.glowOpacity, s.showTrack, s.width, s.top, s.height, s.hideScrollbar, s.holdSpeed,
 			this.inset('insetTop'), this.inset('insetBottom'), this.inset('insetEdge'),
@@ -1155,8 +1246,8 @@ class NoteMinimapPlugin extends Plugin {
 			st.host.style.removeProperty('--nm-width');
 			st.host.style.setProperty('--nm-gutter', hitW + edgeGap + 'px');
 			st.el.style.setProperty('--nm-width', hitW + 'px');
-			st.el.style.setProperty('--nm-thumb', s.thumbWidth + 'px');
-			st.el.style.setProperty('--nm-glyph', Math.min(20, Math.max(10, s.thumbWidth)) + 'px');
+			st.el.style.setProperty('--nm-thumb', this.barWidth() + 'px');
+			st.el.style.setProperty('--nm-glyph', Math.min(20, Math.max(10, this.barWidth())) + 'px');
 			st.el.style.setProperty('--nm-arrow', s.arrowSize + 'px');
 			st.el.style.setProperty('--nm-flow', Math.round(Math.min(800, Math.max(300, 480000 / Math.max(1, s.holdSpeed)))) + 'ms');
 			st.el.style.setProperty('--nm-arrow-gap', (s.showArrows && s.touchEnabled ? s.arrowSize : 0) + 'px');
@@ -1222,6 +1313,16 @@ class NoteMinimapPlugin extends Plugin {
 			st.renderKey = key;
 		}
 
+		// Fast rendering draws the minimap on one canvas; otherwise it is a div per bar.
+		const wantCanvas = !!s.fastRender && !sb;
+		if (!!st.canvas !== wantCanvas) {
+			this.clearLines(st);
+			if (wantCanvas) this.makeCanvas(st);
+			else this.dropCanvas(st);
+			st.text = null;
+			st.linesEl.style.removeProperty('transform');
+		}
+
 		if (s.hideScrollbar) {
 			// Hidden: nothing to draw. The bars are rebuilt on show if the note changed meanwhile.
 		} else if (sb) {
@@ -1230,7 +1331,8 @@ class NoteMinimapPlugin extends Plugin {
 			const text = view.getViewData();
 			if (text !== st.text) {
 				st.text = text;
-				this.buildLines(st, classify(text));
+				if (wantCanvas) this.buildMap(st, classify(text));
+				else this.buildLines(st, classify(text));
 			}
 		}
 
@@ -1241,6 +1343,97 @@ class NoteMinimapPlugin extends Plugin {
 	clearLines(st) {
 		st.linesEl.empty();
 		st.rows = [];
+		st.items = null;
+		st.mapDirty = true;
+		if (st.canvas) this.drawMap(st, st.el.clientHeight);
+	}
+
+	// ---- Fast rendering: the minimap on a single canvas ----------------------
+	// The normal minimap is one <div> per bar (up to 3000), and the browser has to style and lay out
+	// every one. Here the classified lines are kept in an array and only the bars that are in view
+	// are painted, so the cost no longer grows with the length of the note.
+
+	makeCanvas(st) {
+		if (st.canvas) return;
+		const cv = document.createElement('canvas');
+		cv.className = 'note-minimap-canvas';
+		st.el.insertBefore(cv, st.vpEl);
+		st.canvas = cv;
+		st.ctx = cv.getContext('2d');
+		st.cvDirty = true;
+		st.mapDirty = true;
+		st.drawnTop = null;
+	}
+
+	dropCanvas(st) {
+		if (!st.canvas) return;
+		st.canvas.remove();
+		st.canvas = null;
+		st.ctx = null;
+		st.items = null;
+	}
+
+	// Keeps the classified lines and works out the strip height; drawMap paints from them.
+	buildMap(st, items) {
+		const step = Math.max(1, Math.ceil(items.length / MAX_ROWS));
+		st.items = items;
+		st.step = step;
+		st.stripH = Math.ceil(items.length / step) * ROW;
+		st.mapDirty = true;
+	}
+
+	mapTextColor() {
+		if (!this._mapText) this._mapText = getComputedStyle(document.body).color || '#888888';
+		return this._mapText;
+	}
+
+	// Paints the bars that fall inside the strip. Skipped when nothing moved since the last paint.
+	drawMap(st, mapH) {
+		const cv = st.canvas;
+		if (!cv || !st.ctx) return;
+		const top = Math.round(st.stripTop || 0);
+		if (!st.mapDirty && !st.cvDirty && st.drawnTop === top && st.drawnH === mapH) return;
+
+		if (st.cvDirty || st.drawnH !== mapH) {
+			st.cvW = st.el.clientWidth;
+			const dpr = window.devicePixelRatio || 1;
+			const pw = Math.max(1, Math.round(st.cvW * dpr));
+			const ph = Math.max(1, Math.round(mapH * dpr));
+			if (cv.width !== pw) cv.width = pw;
+			if (cv.height !== ph) cv.height = ph;
+			st.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+			st.cvDirty = false;
+		}
+		st.mapDirty = false;
+		st.drawnTop = top;
+		st.drawnH = mapH;
+
+		const ctx = st.ctx;
+		const w = st.cvW;
+		ctx.clearRect(0, 0, w, mapH);
+		const items = st.items;
+		if (!items || !items.length) return;
+
+		const step = st.step;
+		const rowCount = Math.ceil(items.length / step);
+		// Only rows whose 2px bar overlaps the visible strip.
+		const first = Math.max(0, Math.floor((-top - LINE_H) / ROW) + 1);
+		const last = Math.min(rowCount - 1, Math.ceil((mapH - top) / ROW) - 1);
+		let curCls = null;
+		for (let r = first; r <= last; r++) {
+			const it = items[r * step];
+			if (!it || it.cls === 'nm-blank') continue;
+			if (it.cls !== curCls) {
+				curCls = it.cls;
+				const ms = MAP_STYLE[it.cls] || MAP_STYLE['nm-text'];
+				ctx.fillStyle = ms[0] || this.mapTextColor();
+				ctx.globalAlpha = ms[1];
+			}
+			const pct = Math.min(100, Math.max(8, (it.len / 80) * 100));
+			const left = it.indent ? Math.min(it.indent * 2, 16) : 0;
+			ctx.fillRect(left, top + r * ROW, (w * pct) / 100, LINE_H);
+		}
+		ctx.globalAlpha = 1;
 	}
 
 	// Rows are kept between edits and only the ones whose look changed are touched, so typing in a
@@ -1375,7 +1568,8 @@ class NoteMinimapPlugin extends Plugin {
 
 		// Custom properties set on the strip are inherited by every bar (up to 3000), so changing
 		// them each frame would restyle all of them. Transforms on the two moving parts do not.
-		st.linesEl.style.transform = 'translate3d(0,' + st.stripTop + 'px,0)';
+		if (st.canvas) this.drawMap(st, mapH);
+		else st.linesEl.style.transform = 'translate3d(0,' + st.stripTop + 'px,0)';
 		const v = st.vpEl.style;
 		if (st.lastVpH !== vpH) {
 			st.lastVpH = vpH;
@@ -1383,7 +1577,7 @@ class NoteMinimapPlugin extends Plugin {
 			v.height = vpH + 'px';
 		}
 		v.transform = 'translate3d(0,' + vpTop + 'px,0)';
-		// The fade mask only exists while the strip is being dragged.
+		// The dimming overlays only exist while the strip is being dragged.
 		if (st.dragging) {
 			e.setProperty('--nm-fade-top', vpTop + 'px');
 			e.setProperty('--nm-fade-bot', vpTop + vpH + 'px');
@@ -1433,6 +1627,16 @@ class MinimapSettingTab extends PluginSettingTab {
 			);
 
 		new Setting(containerEl)
+			.setName('Fast rendering')
+			.setDesc('Makes the minimap style much lighter on long notes: it is painted on a single canvas instead of thousands of elements, waits a little longer after you stop typing before it refreshes, and skips notes in background tabs until you switch to them. Nothing about how the note or the scrollbar looks changes. The scrollbar style is already light, so this has no effect on it.')
+			.addToggle((t) =>
+				t.setValue(p.settings.fastRender).onChange(async (v) => {
+					p.settings.fastRender = v;
+					await p.saveSettings();
+				})
+			);
+
+		new Setting(containerEl)
 			.setName('Style')
 			.setDesc('Scrollbar: a thin draggable bar that looks like the normal scrollbar. Minimap: the colour-coded overview (very demanding, so it may lag on long notes).')
 			.addDropdown((d) =>
@@ -1470,7 +1674,7 @@ class MinimapSettingTab extends PluginSettingTab {
 					comps[key] = sl;
 					sl
 						.setLimits(min, max, step)
-						.setValue(typeof p.settings[key] === 'number' ? p.settings[key] : p.inset(key))
+						.setValue(typeof p.settings[key] === 'number' ? p.settings[key] : key === 'thumbWidth' ? p.barWidth() : p.inset(key))
 						.setDynamicTooltip()
 						.onChange(async (v) => {
 							p.settings[key] = v;
@@ -1480,8 +1684,8 @@ class MinimapSettingTab extends PluginSettingTab {
 				});
 
 		if (p.settings.style === 'scrollbar') {
-			slider('Bar width', 'Width of the visible scrollbar, in pixels. The touch area below grows with it if it would otherwise be too narrow.', 'thumbWidth', 6, 40, 1, () => {
-				const need = p.settings.thumbWidth + 6;
+			slider('Bar width', 'Width of the visible scrollbar, in pixels. Starts at 14 and adjusts slightly to the screen of each device until you move this slider. The touch area below grows with it if it would otherwise be too narrow.', 'thumbWidth', 6, 40, 1, () => {
+				const need = p.barWidth() + 6;
 				if (p.settings.hitWidth < need) {
 					p.settings.hitWidth = need;
 					if (comps.hitWidth) comps.hitWidth.setValue(need);
@@ -1570,7 +1774,7 @@ class MinimapSettingTab extends PluginSettingTab {
 			slider('Bottom margin', 'Shortens the scrollbar from the bottom, so the gesture bar or a rounded corner does not cover the arrow.', 'insetBottom', 0, 240, 2);
 			slider('Edge margin', 'Moves the scrollbar in from the side of the screen, away from curved edges, in pixels.', 'insetEdge', 0, 60, 1);
 			slider('Touch area', 'Width of the scrollbar column that grabs your finger, in pixels. The bar sits inside it and the note is kept clear of it, so nothing overlaps. It is never narrower than the bar.', 'hitWidth', 20, 140, 2, (v) => {
-				const need = p.settings.thumbWidth + 6;
+				const need = p.barWidth() + 6;
 				if (v < need) {
 					p.settings.hitWidth = need;
 					if (comps.hitWidth) comps.hitWidth.setValue(need);
