@@ -1,7 +1,7 @@
 {
 	"id": "my-note-minimap",
 	"name": "My Note Minimap",
-	"version": "1.4.0",
+	"version": "1.4.1",
 	"minAppVersion": "1.4.0",
 	"description": "Adds a colour-coded minimap beside each markdown note, with click-and-drag navigation.",
 	"author": "Khalid",
