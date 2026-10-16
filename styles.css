@@ -473,10 +473,11 @@ html body.nm-animate-bars.nm-bars-hidden .view-header {
 	max-width: 80vw;
 	padding: 8px 14px;
 	border-radius: var(--radius-m, 8px);
-	background: var(--background-modifier-message, var(--background-secondary));
+	background: var(--background-primary);
 	color: var(--text-normal);
+	border: 1px solid var(--background-modifier-border);
 	font-size: var(--font-ui-small, 13px);
-	box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+	box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
 	pointer-events: none;
 	animation: nm-toast-in 0.14s ease both;
 }
