@@ -1667,7 +1667,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		const comps = {};
 		const slider = (name, desc, key, min, max, step, adjust) =>
-			new Setting(containerEl)
+			this.withReset(new Setting(containerEl)
 				.setName(name)
 				.setDesc(desc)
 				.addSlider((sl) => {
@@ -1681,7 +1681,7 @@ class MinimapSettingTab extends PluginSettingTab {
 							if (adjust) adjust(v);
 							await p.saveSettings();
 						});
-				});
+				}), [key]);
 
 		if (p.settings.style === 'scrollbar') {
 			slider('Bar width', 'Width of the visible scrollbar, in pixels. Starts at 14 and adjusts slightly to the screen of each device until you move this slider. The touch area below grows with it if it would otherwise be too narrow.', 'thumbWidth', 6, 40, 1, () => {
@@ -1842,6 +1842,25 @@ class MinimapSettingTab extends PluginSettingTab {
 		this.renderExclusions(containerEl);
 	}
 
+	// Adds a reset button that puts the given settings back to their defaults.
+	withReset(setting, keys) {
+		const p = this.plugin;
+		setting.addExtraButton((b) =>
+			b
+				.setIcon('rotate-ccw')
+				.setTooltip('Reset to default')
+				.onClick(async () => {
+					for (const k of keys) p.settings[k] = DEFAULTS[k];
+					await p.saveSettings();
+					const box = this.containerEl;
+					const top = box.scrollTop;
+					this.display();
+					box.scrollTop = top;
+				})
+		);
+		return setting;
+	}
+
 	// A colour picker plus a hex text box that stay in sync. Empty text = '' (theme default).
 	addColorSetting(containerEl, { name, desc, key, fallback }) {
 		const p = this.plugin;
@@ -1942,17 +1961,6 @@ class MinimapSettingTab extends PluginSettingTab {
 				await p.saveSettings();
 			});
 		});
-
-		setting.addExtraButton((b) =>
-			b
-				.setIcon('rotate-ccw')
-				.setTooltip('Reset')
-				.onClick(async () => {
-					p.settings[key] = '';
-					await p.saveSettings();
-					this.display();
-				})
-		);
 
 		// Quick picks: tap a swatch to use that colour. Read from the live theme, so they follow it.
 		const pick = async (hex) => {

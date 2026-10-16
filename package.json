@@ -1,6 +1,6 @@
 {
   "name": "my-note-minimap",
-  "version": "1.4.2",
+  "version": "1.4.5",
   "description": "Adds a colour-coded minimap beside each markdown note, with click-and-drag navigation.",
   "main": "main.js",
   "author": "Khalid",
