@@ -51,6 +51,10 @@ The **scrollbar** style is light and smooth. The **minimap** style is very deman
 
 The scrollbar style is already light, so Fast rendering has no effect on it.
 
+## What's new in 3.0.1
+
+- **Fixed: a note could go blank after rotating the phone, or a note opened from another note could fail to appear.** The reading-view change in 2.0.50 holds back Obsidian's slice-by-slice drawing while you hold an arrow. Two things went wrong with it: it was switched on during ordinary scrolling too, and the normal way a scroll comes to rest never switched it off again. It could then stay on afterwards and block Obsidian from drawing a rotated or newly opened note. Now it is only ever on while a finger is actually on an arrow, it is switched off the moment the scroll settles, and it lets Obsidian's own drawing through at once for any different note, any rebuilt layout (a rotation) or any note with nothing laid out yet. A rotation also lifts it immediately. Anything that was held back is carried on afterwards, even if it was held back during the glide to rest.
+
 ## What's new in 3.0.0
 
 - **Hold speed now starts at 200 px/s** (down from 320), a calmer pace that is easier to follow with the eyes. If you were still on the old default of 320 it switches over by itself; any other value you chose is kept. Change it any time under Settings → My Note Minimap → *Hold speed*.

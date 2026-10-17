@@ -476,6 +476,10 @@ class NoteMinimapPlugin extends Plugin {
 		// strip's own ResizeObserver; re-measuring and re-styling everything for them just made typing
 		// on a phone stutter.
 		this._screenKey = this.screenKey();
+		// A rotation makes Obsidian redraw the whole reading view at once; nothing may be held back from it.
+		this.registerDomEvent(window, 'resize', () => {
+			for (const st of this.states.values()) if (st.rgOn) this.ungateRender(st);
+		});
 		this.registerDomEvent(window, 'resize', debounce(() => {
 			const key = this.screenKey();
 			if (key === this._screenKey) return;
@@ -1165,9 +1169,16 @@ class NoteMinimapPlugin extends Plugin {
 		const orig = r.queueRender;
 		const own = Object.prototype.hasOwnProperty.call(r, 'queueRender');
 		const plugin = this;
+		const secs = r.sections;
 		r.queueRender = function (...args) {
 			try {
-				if (!plugin.renderNeeded(r)) {
+				const g = st.rgOn;
+				// Anything that is not the same hold on the same drawn note (a different note in this view, a rebuilt
+				// section list after a rotation, the hold being over) is Obsidian's own business: lift the gate and let
+				// the request through, so a note can never be left undrawn.
+				if (!g || g.r !== r || g.secs !== r.sections || !st.hold || st.dead) {
+					plugin.ungateRender(st, true);
+				} else if (!plugin.renderNeeded(r)) {
 					st.rgPending = true;
 					if (st.diag) st.diag.rgN++;
 					return;
@@ -1177,31 +1188,37 @@ class NoteMinimapPlugin extends Plugin {
 			}
 			return orig.apply(this, args);
 		};
-		st.rgOn = { r, orig, own };
+		st.rgOn = { r, orig, own, secs };
 	}
 
 	ungateRender(st, quick) {
 		const g = st.rgOn;
-		if (!g) return;
-		st.rgOn = null;
-		try {
-			if (g.own) g.r.queueRender = g.orig;
-			else delete g.r.queueRender;
-		} catch (e) {}
-		if (st.rgPending && !quick) {
-			st.rgPending = false;
-			// Carry on drawing the rest of the note once the hold is over and the bars have had their moment.
-			window.setTimeout(() => {
-				if (this._unloaded) return;
-				if (st.rgOn || st.running || st.hold) {
-					st.rgPending = true; // another hold began: carry on when that one ends
-					return;
-				}
-				try {
-					g.r.queueRender();
-				} catch (e) {}
-			}, 300);
+		if (g) {
+			st.rgOn = null;
+			st.rgR = g.r; // kept so the drawing that was held back can still be carried on afterwards
+			try {
+				if (g.own) g.r.queueRender = g.orig;
+				else delete g.r.queueRender;
+			} catch (e) {}
 		}
+		if (!st.rgPending) return;
+		if (quick || this._unloaded) {
+			st.rgPending = false;
+			return;
+		}
+		if (st.rgFlush) return; // one carry-on is already waiting
+		// Carry on drawing the rest of the note once the hold is over and the bars have had their moment.
+		st.rgFlush = window.setTimeout(() => {
+			st.rgFlush = 0;
+			if (this._unloaded || st.dead) return;
+			// Another hold began: the next time the gate is lifted it carries on (the flag stays set).
+			if (st.rgOn || st.running || st.hold) return;
+			st.rgPending = false;
+			try {
+				const r = st.rgR;
+				if (r && typeof r.queueRender === 'function') r.queueRender();
+			} catch (e) {}
+		}, 300);
 	}
 
 	// True if any section from one screen behind to three screens ahead of the screen is not drawn yet.
@@ -1223,15 +1240,18 @@ class NoteMinimapPlugin extends Plugin {
 		}
 		const avg = cnt ? sum / cnt : 100;
 		let y = r.topSpace || 0;
+		let seen = false; // at least one section is laid out
 		for (let i = 0; i < secs.length; i++) {
 			const sec = secs[i];
 			if (!sec.shown) continue;
+			seen = true;
 			if (y > hi) break;
 			const bottom = y + (sec.height > 0 ? sec.height : avg);
 			if (bottom >= lo && !sec.rendered) return true;
 			y = bottom;
 		}
-		return false;
+		// A note with no section laid out yet (just opened, or just rebuilt) has to be drawn: never hold that back.
+		return !seen;
 	}
 
 	// Scroll diagnostics, reading view: times Obsidian's own re-plans and render passes during a hold, so the report
@@ -1970,6 +1990,7 @@ class NoteMinimapPlugin extends Plugin {
 		const sc = st.scroller;
 		if (!sc) {
 			st.running = false;
+			this.ungateRender(st);
 			return;
 		}
 		const rawDt = (now - st.lastT) / 1000;
@@ -2079,6 +2100,7 @@ class NoteMinimapPlugin extends Plugin {
 			st.lead = false;
 			sc.scrollTop = st.pos;
 			st.lastWrite = null;
+			this.ungateRender(st);
 			this.liteOff();
 			this.updateViewport(st);
 			this.trackBars(st, st.pos);
@@ -2342,7 +2364,9 @@ class NoteMinimapPlugin extends Plugin {
 
 		if (st.boundMode === 'preview') {
 			if (st.diag) this.timePlans(st);
-			if (this.settings.holdLite && !this._boostBad) this.gateRender(st);
+			// Held back only while a finger is on an arrow. A tap, or the glide to rest after letting go, draws normally.
+			if (this.settings.holdLite && !this._boostBad && st.hold) this.gateRender(st);
+			else this.ungateRender(st);
 		}
 		this.updateViewport(st, pos);
 		this.trackBars(st, pos);
