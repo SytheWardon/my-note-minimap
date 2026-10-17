@@ -25,8 +25,13 @@
 	user-select: none;
 	-webkit-touch-callout: none;
 	-webkit-tap-highlight-color: transparent;
+	touch-action: none;
+	overscroll-behavior: contain;
 	will-change: transform;
 	backface-visibility: hidden;
+	/* Nothing inside the strip can change layout or styles outside it, and the thumb moving every frame
+	   no longer makes the browser consider the note next to it. */
+	contain: layout style;
 }
 
 .note-minimap.note-minimap-left {
@@ -99,6 +104,7 @@
 }
 
 .note-minimap-line {
+	pointer-events: none;
 	position: absolute;
 	left: 0;
 	top: var(--nm-line-top, 0px);
@@ -308,8 +314,11 @@
 		nm-pill-breathe 1.1s ease-in-out 0.45s infinite alternate;
 }
 
-.note-minimap.nm-scrollbar.nm-holding.nm-press-up .nm-arrow-up::after { animation: nm-flow-up var(--nm-flow, 420ms) cubic-bezier(0.3, 0, 0.4, 1) infinite; }
-.note-minimap.nm-scrollbar.nm-holding.nm-press-down .nm-arrow-down::after { animation: nm-flow-down var(--nm-flow, 420ms) cubic-bezier(0.3, 0, 0.4, 1) infinite; }
+/* The glyph bobs continuously: out in the direction of travel, then back, then out again. `alternate` plays
+   every other cycle in reverse, so there is no jump back to the start; the easing is symmetric (ease-in-out)
+   so the turn-around at each end is smooth. One leg takes 0.75 x --nm-flow. */
+.note-minimap.nm-scrollbar.nm-holding.nm-press-up .nm-arrow-up::after { animation: nm-flow-up calc(var(--nm-flow, 420ms) * 0.75) ease-in-out infinite alternate; }
+.note-minimap.nm-scrollbar.nm-holding.nm-press-down .nm-arrow-down::after { animation: nm-flow-down calc(var(--nm-flow, 420ms) * 0.75) ease-in-out infinite alternate; }
 
 @keyframes nm-pill-pop {
 	0% { opacity: 0; transform: scale(0.6, 0.75); }
@@ -322,16 +331,24 @@
 	to { opacity: 0.28; transform: scale(0.985, 1.04); }
 }
 
+/* `from` is the pressed resting pose (the same transform the glyph already has when the animation starts), so
+   the loop begins without a jump. Played with `alternate`: up (or down) to `to`, back to `from`, and on. */
+/* How far the glyph may travel from the pill's middle and still stay inside it: the pill is 0.66 x the arrow
+   height tall, the scaled glyph about 0.66 x the glyph size, so the room each side is 0.33 x (arrow - glyph),
+   less a 4px margin, so the glyph never touches the pill's border. Never less than the 2px resting offset (then it simply
+   does not bob), never more than 6px. */
+.note-minimap.nm-scrollbar .nm-arrow {
+	--nm-bob: clamp(2px, calc((var(--nm-arrow, 36px) - var(--nm-glyph, 14px)) * 0.33 - 4px), 6px);
+}
+
 @keyframes nm-flow-up {
-	0% { opacity: 0.3; transform: translate(-50%, calc(-50% + 3px)) scale(1.2); }
-	35% { opacity: 1; }
-	100% { opacity: 0.2; transform: translate(-50%, calc(-50% - 4px)) scale(1.2); }
+	from { opacity: 0.6; transform: translate(-50%, calc(-50% - 2px)) scale(1.2); }
+	to { opacity: 1; transform: translate(-50%, calc(-50% - var(--nm-bob))) scale(1.2); }
 }
 
 @keyframes nm-flow-down {
-	0% { opacity: 0.3; transform: translate(-50%, calc(-50% - 3px)) scale(1.2); }
-	35% { opacity: 1; }
-	100% { opacity: 0.2; transform: translate(-50%, calc(-50% + 4px)) scale(1.2); }
+	from { opacity: 0.6; transform: translate(-50%, calc(-50% + 2px)) scale(1.2); }
+	to { opacity: 1; transform: translate(-50%, calc(-50% + var(--nm-bob))) scale(1.2); }
 }
 
 /* At the very top / bottom the matching arrow rests, dimmed, and bumps instead of flowing. */
@@ -364,20 +381,24 @@
 
 @keyframes nm-bump-up {
 	0%, 100% { transform: translate(-50%, -50%) scale(1.1); }
-	35% { transform: translate(-50%, calc(-50% - 4px)) scale(1.1); }
+	35% { transform: translate(-50%, calc(-50% - min(4px, var(--nm-bob)))) scale(1.1); }
 	65% { transform: translate(-50%, calc(-50% + 1px)) scale(1.1); }
 }
 
 @keyframes nm-bump-down {
 	0%, 100% { transform: translate(-50%, -50%) scale(1.1); }
-	35% { transform: translate(-50%, calc(-50% + 4px)) scale(1.1); }
+	35% { transform: translate(-50%, calc(-50% + min(4px, var(--nm-bob)))) scale(1.1); }
 	65% { transform: translate(-50%, calc(-50% - 1px)) scale(1.1); }
 }
 
-/* ---- Top header and bottom bar: ease in and out while the strip scrolls the note ---- */
+/* ---- Top header and bottom bar: ease in and out while the strip scrolls the note ----
+   Slide and fade together, as the earlier 1.4.x releases did. Both bars are kept on their own graphics layers
+   for as long as the animation setting is on: building two big layers on the first frame of the slide, at the
+   same moment, was what made the slide start with a hitch. */
 html body.nm-animate-bars.nm-animate-bars .mobile-navbar,
 html body.nm-animate-bars.nm-animate-bars .view-header {
 	transition: transform 0.45s cubic-bezier(0.22, 0.9, 0.25, 1), opacity 0.35s ease;
+	will-change: transform, opacity;
 }
 
 html body.nm-animate-bars.nm-bars-hidden .mobile-navbar {
@@ -564,6 +585,89 @@ html body.nm-animate-bars.nm-bars-hidden .view-header {
 	width: 100%;
 }
 
+/* Auto / Custom switch and the panel that opens under Custom. */
+.nm-colour-modes {
+	display: flex;
+	gap: 10px;
+}
+.nm-colour-modes button.nm-colour-mode {
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	gap: 8px;
+	box-sizing: border-box;
+	height: 36px;
+	min-width: 96px;
+	margin: 0;
+	padding: 0 18px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 999px;
+	background: var(--interactive-normal);
+	color: var(--text-normal);
+	box-shadow: none;
+	font-size: var(--font-ui-small, 13px);
+	font-weight: 600;
+	cursor: pointer;
+	transition: transform 0.12s cubic-bezier(0.34, 1.56, 0.64, 1), outline-color 0.15s ease;
+}
+.nm-colour-modes button.nm-colour-mode:active {
+	transform: scale(0.94);
+}
+.nm-colour-modes button.nm-colour-mode.is-selected {
+	outline: 2px solid var(--text-normal);
+	outline-offset: 2px;
+}
+.nm-colour-modes .nm-swatch-tick {
+	display: none;
+}
+.nm-colour-modes button.is-selected .nm-swatch-tick {
+	display: inline-flex;
+}
+.nm-colour-dot {
+	width: 12px;
+	height: 12px;
+	border-radius: 50%;
+	border: 1px solid var(--background-modifier-border);
+	background: transparent;
+}
+.nm-colour-mode:not(.is-selected) .nm-colour-dot {
+	display: none;
+}
+.nm-colour-panel {
+	/* Opens and closes with a fade-and-slide driven from the script; the layout itself changes only once. */
+	margin: 0 -4px;
+}
+.nm-colour-panel.nm-colour-collapsing {
+	overflow: hidden;
+}
+.nm-colour-panel.is-closed {
+	display: none;
+}
+.nm-colour-panel-inner {
+	display: flex;
+	flex-direction: column;
+	gap: 12px;
+	padding: 4px;
+	box-sizing: border-box;
+}
+.nm-colour-inputs {
+	display: flex;
+	align-items: center;
+	gap: 12px;
+}
+.nm-colour-inputs .nm-hex-input {
+	flex: 1 1 0;
+	width: auto;
+	min-width: 0;
+}
+.nm-colour-inputs input[type="color"] {
+	flex: 1 1 0;
+	min-width: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+	.nm-colour-modes button.nm-colour-mode { transition: none; }
+}
+
 /* Fixed-size pills. flex/width are locked so mobile button styles cannot stretch them. */
 .nm-swatch-setting .nm-swatch-grid button.nm-swatch {
 	position: relative;
@@ -715,4 +819,432 @@ html body.nm-animate-bars.nm-bars-hidden .view-header {
 	line-height: var(--line-height-tight);
 	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
 	pointer-events: none;
+}
+
+/* ---- Settings: slider and reset button animations ---- */
+.setting-item input[type="range"]::-webkit-slider-thumb {
+	transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s ease;
+}
+.setting-item input[type="range"]:hover::-webkit-slider-thumb {
+	transform: scale(1.15);
+}
+.setting-item input[type="range"]:active::-webkit-slider-thumb,
+.setting-item input[type="range"].nm-slider-gliding::-webkit-slider-thumb {
+	transform: scale(1.3);
+}
+.setting-item input[type="range"]::-moz-range-thumb {
+	transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s ease;
+}
+.setting-item input[type="range"]:hover::-moz-range-thumb {
+	transform: scale(1.15);
+}
+.setting-item input[type="range"]:active::-moz-range-thumb,
+.setting-item input[type="range"].nm-slider-gliding::-moz-range-thumb {
+	transform: scale(1.3);
+}
+
+.setting-item .clickable-icon {
+	transition: transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1), background-color 0.15s ease;
+}
+.setting-item .clickable-icon:active {
+	transform: scale(0.85);
+}
+.setting-item .clickable-icon.nm-reset-spin svg {
+	animation: nm-reset-spin 0.55s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@keyframes nm-reset-spin {
+	from { transform: rotate(0deg); }
+	to { transform: rotate(-360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.setting-item input[type="range"]::-webkit-slider-thumb,
+	.setting-item input[type="range"]::-moz-range-thumb,
+	.setting-item .clickable-icon {
+		transition: none;
+	}
+	.setting-item .clickable-icon.nm-reset-spin svg {
+		animation: none;
+	}
+}
+
+/* The pop-up that holds the refresh-rate menu. Only opacity and position change, so it stays smooth on a phone: the
+   backdrop fades, and the panel rises into place with a soft overshoot. The same in reverse when it closes. */
+.nm-hz-container .modal-bg {
+	animation: nm-hz-bg-in 0.26s ease both !important;
+	-webkit-backdrop-filter: none !important;
+	backdrop-filter: none !important;
+}
+.nm-hz-container .modal.nm-hz-box {
+	animation: nm-hz-box-in 0.34s cubic-bezier(0.2, 0.9, 0.25, 1.08) both !important;
+	will-change: transform, opacity;
+}
+.nm-hz-container.nm-hz-closing .modal-bg {
+	animation: nm-hz-bg-out 0.19s ease-in both !important;
+}
+.nm-hz-container.nm-hz-closing .modal.nm-hz-box {
+	animation: nm-hz-box-out 0.19s ease-in both !important;
+}
+@keyframes nm-hz-bg-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes nm-hz-bg-out { from { opacity: 1; } to { opacity: 0; } }
+@keyframes nm-hz-box-in {
+	from { opacity: 0; transform: translateY(36px) scale(0.96); }
+	to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes nm-hz-box-out {
+	from { opacity: 1; transform: translateY(0) scale(1); }
+	to { opacity: 0; transform: translateY(28px) scale(0.97); }
+}
+@media (prefers-reduced-motion: reduce) {
+	.nm-hz-container .modal-bg,
+	.nm-hz-container .modal.nm-hz-box { animation: none !important; }
+}
+
+/* Refresh-rate question / measuring box */
+.nm-hz-modal .nm-hz-status { color: var(--text-muted); margin-bottom: 8px; min-height: 2.6em; }
+.nm-hz-modal .nm-hz-pad {
+	position: relative;
+	height: 120px;
+	margin: 8px 0 12px;
+	border: 1px dashed var(--background-modifier-border);
+	border-radius: 12px;
+	overflow: hidden;
+	touch-action: none;
+	-webkit-user-select: none;
+	user-select: none;
+	transition: border-color 0.25s ease, background-color 0.25s ease;
+}
+.nm-hz-modal .nm-hz-pad.nm-hz-live {
+	border-style: solid;
+	border-color: var(--interactive-accent);
+	background-color: color-mix(in srgb, var(--interactive-accent) 8%, transparent);
+}
+.nm-hz-modal .nm-hz-hint {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: 0 12px;
+	text-align: center;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-faint);
+	transition: opacity 0.2s ease;
+}
+.nm-hz-modal .nm-hz-pad.nm-hz-live .nm-hz-hint,
+.nm-hz-modal .nm-hz-pad.nm-hz-done .nm-hz-hint { opacity: 0; }
+/* The dot only exists while measuring: it grows in, sweeps across, and shrinks away. Its position is set from the
+   script on every frame (that is what keeps the screen at full rate); size and fade use their own properties so
+   they never fight with it. */
+.nm-hz-modal .nm-hz-dot {
+	position: absolute;
+	left: 0;
+	top: 50%;
+	width: 24px;
+	height: 24px;
+	margin-top: -12px;
+	border-radius: 50%;
+	background: var(--interactive-accent);
+	opacity: 0;
+	scale: 0.3;
+	transition: opacity 0.25s ease, scale 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+	will-change: transform;
+}
+.nm-hz-modal .nm-hz-pad.nm-hz-live .nm-hz-dot { opacity: 0.9; scale: 1; }
+.nm-hz-modal .nm-hz-progress {
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	height: 3px;
+	background: var(--interactive-accent);
+	transform: scaleX(0);
+	transform-origin: left center;
+	opacity: 0;
+	transition: opacity 0.25s ease;
+}
+.nm-hz-modal .nm-hz-pad.nm-hz-live .nm-hz-progress { opacity: 1; }
+.nm-hz-modal .nm-hz-result {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	font-size: 28px;
+	font-weight: 600;
+	color: var(--text-normal);
+	opacity: 0;
+	pointer-events: none;
+}
+.nm-hz-modal .nm-hz-pad.nm-hz-done .nm-hz-result { animation: nm-hz-pop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1) forwards; }
+@keyframes nm-hz-pop {
+	from { opacity: 0; transform: scale(0.6); }
+	to { opacity: 1; transform: scale(1); }
+}
+.nm-hz-modal .nm-hz-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.nm-hz-modal .nm-hz-row button {
+	transition: transform 0.12s cubic-bezier(0.34, 1.56, 0.64, 1), outline-color 0.2s ease;
+}
+.nm-hz-modal .nm-hz-row button:active:not(:disabled) { transform: scale(0.94); }
+.nm-hz-modal .nm-hz-row button.nm-hz-current {
+	outline: 2px solid var(--text-normal);
+	outline-offset: 2px;
+}
+.nm-hz-modal .nm-hz-note { color: var(--text-faint); font-size: var(--font-ui-smaller); }
+@media (prefers-reduced-motion: reduce) {
+	.nm-hz-modal .nm-hz-pad,
+	.nm-hz-modal .nm-hz-hint,
+	.nm-hz-modal .nm-hz-dot,
+	.nm-hz-modal .nm-hz-progress,
+	.nm-hz-modal .nm-hz-row button { transition: none; }
+	.nm-hz-modal .nm-hz-pad.nm-hz-done .nm-hz-result { animation: none; opacity: 1; }
+}
+
+/* While an arrow is held (see liteOn in main.js): no blur behind the header, bottom bar or toolbar, so the
+   graphics chip is not redoing it on every frame of the scroll. Back as soon as the note stops. */
+html body.nm-hold-lite .view-header,
+html body.nm-hold-lite .mobile-navbar,
+html body.nm-hold-lite .mobile-toolbar,
+html body.nm-hold-lite .workspace-tab-header-container {
+	-webkit-backdrop-filter: none !important;
+	backdrop-filter: none !important;
+}
+
+/* ---- Settings: sliders. One row holds [-] [slider] [+] [number]; nothing in it can grow past the screen. ---- */
+.setting-item.nm-slider-setting .setting-item-control {
+	flex: 1 1 100%;
+	width: 100%;
+	min-width: 0;
+	max-width: 100%;
+	flex-wrap: nowrap;
+	justify-content: flex-start;
+	gap: 8px;
+}
+
+.nm-slider-row {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	flex: 1 1 auto;
+	min-width: 0;
+	max-width: 100%;
+	box-sizing: border-box;
+}
+
+.nm-slider-row .nm-step-btn {
+	flex: 0 0 40px !important;
+	width: 40px !important;
+	min-width: 40px !important;
+	max-width: 40px !important;
+	height: 34px;
+	margin: 0;
+	padding: 0;
+	border: none;
+	border-radius: 999px;
+	background: var(--interactive-normal);
+	color: var(--text-normal);
+	font-size: 20px;
+	line-height: 1;
+	box-shadow: none;
+	touch-action: manipulation;
+	-webkit-user-select: none;
+	user-select: none;
+	-webkit-touch-callout: none;
+	transition: transform 0.12s cubic-bezier(0.34, 1.56, 0.64, 1), background-color 0.15s ease;
+}
+/* The minus and plus are drawn as bars from the exact middle of the button, so they never sit high or low the way a
+   text character does. */
+.nm-slider-row .nm-step-btn {
+	position: relative;
+	font-size: 0 !important;
+	overflow: hidden;
+}
+.nm-slider-row .nm-step-btn::before,
+.nm-slider-row .nm-step-btn.nm-step-plus::after {
+	content: "";
+	position: absolute;
+	left: 50%;
+	top: 50%;
+	border-radius: 2px;
+	background: currentColor;
+	transform: translate(-50%, -50%);
+}
+.nm-slider-row .nm-step-btn::before { width: 14px; height: 2px; }
+.nm-slider-row .nm-step-btn.nm-step-plus::after { width: 2px; height: 14px; }
+.nm-slider-row .nm-step-btn:active {
+	transform: scale(0.88);
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+}
+
+.nm-slider-row .nm-slider-value {
+	flex: 0 0 auto;
+	min-width: 2.4em;
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small, 13px);
+}
+
+/* The slider itself. The groove (grey pill plus the accent fill) is drawn by two plain elements behind the input,
+   and the input's own track is exactly as tall as the thumb and see-through. The thumb therefore has nothing to
+   line up against except the input itself: no margin tricks, so every browser and phone centres it the same way. */
+.nm-slider-wrap {
+	position: relative;
+	flex: 1 1 auto;
+	min-width: 0;
+	height: 22px;
+	--nm-thumb-w: 32px;
+}
+.nm-slider-groove {
+	position: absolute;
+	left: 0;
+	right: 0;
+	top: 50%;
+	height: 12px;
+	transform: translateY(-50%);
+	border-radius: 999px;
+	background: var(--background-modifier-border);
+	overflow: hidden;
+	pointer-events: none;
+}
+.nm-slider-fill {
+	position: absolute;
+	left: 0;
+	top: 0;
+	bottom: 0;
+	width: calc(var(--nm-thumb-w) / 2 + (100% - var(--nm-thumb-w)) * var(--nm-frac, 0.5));
+	border-radius: 999px;
+	background: var(--interactive-accent);
+}
+.nm-slider-wrap input[type="range"] {
+	-webkit-appearance: none !important;
+	appearance: none !important;
+	position: absolute !important;
+	left: 0 !important;
+	top: 0 !important;
+	width: 100% !important;
+	min-width: 0 !important;
+	max-width: none !important;
+	height: 22px !important;
+	margin: 0 !important;
+	padding: 0 !important;
+	background: transparent !important;
+	cursor: pointer;
+	touch-action: pan-y;
+}
+.nm-slider-wrap input[type="range"]::-webkit-slider-runnable-track {
+	box-sizing: border-box !important;
+	height: 22px !important;
+	border: none !important;
+	border-radius: 0 !important;
+	background: transparent !important;
+	box-shadow: none !important;
+}
+.nm-slider-wrap input[type="range"]::-webkit-slider-thumb {
+	-webkit-appearance: none !important;
+	appearance: none !important;
+	box-sizing: border-box !important;
+	width: var(--nm-thumb-w) !important;
+	height: 22px !important;
+	margin: 0 !important;
+	border-radius: 999px !important;
+	border: none !important;
+	background: transparent !important;
+	box-shadow: none !important;
+	opacity: 0 !important;
+}
+.nm-slider-wrap input[type="range"]::-moz-range-track {
+	height: 22px;
+	background: transparent;
+}
+.nm-slider-wrap input[type="range"]::-moz-range-progress {
+	height: 22px;
+	background: transparent;
+}
+.nm-slider-wrap input[type="range"]::-moz-range-thumb {
+	box-sizing: border-box;
+	width: var(--nm-thumb-w);
+	height: 22px;
+	border-radius: 999px;
+	border: none;
+	background: transparent;
+	box-shadow: none;
+	opacity: 0;
+}
+/* The visible thumb is our own pill, placed from the same fraction as the fill, so it can never sit off the groove.
+   The real (invisible) thumb above still takes the finger. */
+.nm-slider-wrap .nm-slider-thumb {
+	position: absolute;
+	top: 0;
+	left: calc((100% - var(--nm-thumb-w)) * var(--nm-frac, 0.5));
+	width: var(--nm-thumb-w);
+	height: 22px;
+	border-radius: 999px;
+	background: #fff;
+	box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+	pointer-events: none;
+	transition: transform 0.18s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.2s ease;
+}
+.nm-slider-wrap input[type="range"]:active ~ .nm-slider-thumb,
+.nm-slider-wrap input[type="range"].nm-slider-gliding ~ .nm-slider-thumb {
+	transform: scale(1.3);
+}
+@media (prefers-reduced-motion: reduce) {
+	.nm-slider-wrap .nm-slider-thumb { transition: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+	.nm-slider-row .nm-step-btn { transition: none; }
+}
+
+/* The number pops and flashes the accent colour when a step button changes it. */
+.nm-slider-row .nm-slider-value {
+	transform-origin: right center;
+	transition: opacity 0.16s ease, transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+/* While the slider is in use the number at the side shrinks away and the pop-up takes over. */
+.nm-slider-row.nm-active .nm-slider-value {
+	opacity: 0;
+	transform: scale(0.5) translateY(-4px);
+}
+.nm-slider-wrap .nm-slider-bubble {
+	position: absolute;
+	left: calc((100% - var(--nm-thumb-w)) * var(--nm-frac, 0.5) + var(--nm-thumb-w) / 2);
+	bottom: calc(100% + 8px);
+	z-index: 3;
+	min-width: 38px;
+	padding: 6px 12px;
+	box-sizing: border-box;
+	border-radius: 999px;
+	background: #fff;
+	color: #1c1c1c;
+	font-size: 15px;
+	font-weight: 600;
+	line-height: 1.2;
+	text-align: center;
+	font-variant-numeric: tabular-nums;
+	box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+	pointer-events: none;
+	opacity: 0;
+	transform: translateX(-50%) translateY(14px) scale(0.2);
+	transform-origin: 50% 100%;
+	transition: opacity 0.12s ease, transform 0.24s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.nm-slider-row.nm-active .nm-slider-bubble {
+	opacity: 1;
+	transform: translateX(-50%) translateY(0) scale(1);
+}
+@media (prefers-reduced-motion: reduce) {
+	.nm-slider-row .nm-slider-value, .nm-slider-wrap .nm-slider-bubble { transition: none; }
+}
+.nm-slider-row .nm-slider-value.nm-pop {
+	animation: nm-value-pop 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+@keyframes nm-value-pop {
+	0% { transform: scale(1.3); color: var(--text-accent); }
+	100% { transform: scale(1); color: var(--text-muted); }
+}
+@media (prefers-reduced-motion: reduce) {
+	.nm-slider-row .nm-slider-value.nm-pop { animation: none; }
 }

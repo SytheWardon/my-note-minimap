@@ -1,6 +1,6 @@
 'use strict';
 
-const { Plugin, MarkdownView, PluginSettingTab, Setting, Platform, Notice, debounce, setIcon } = require('obsidian');
+const { Plugin, MarkdownView, PluginSettingTab, Setting, Platform, Notice, Modal, debounce, setIcon } = require('obsidian');
 
 const DEFAULTS = {
 	style: 'scrollbar', // 'scrollbar' or 'minimap'
@@ -21,10 +21,14 @@ const DEFAULTS = {
 	showArrows: true,
 	arrowSize: 36, // px height of each arrow button (also its touch zone)
 	stepSize: 120, // px scrolled per arrow tap
-	holdSpeed: 1200, // px per second while an arrow is held
+	holdSpeed: 320, // px per second while an arrow is held; slow enough for the eye to follow the text as it moves
 	smooth: true,
-	animateBars: true, // slide/fade the top header and bottom bar while scrolling with the strip
+	animateBars: false, // slide/fade the top header and bottom bar while scrolling with the strip
 	smoothMs: 340, // length of the glide animation
+	diagnostics: false, // after letting go of an arrow, show how smoothly the screen kept up
+	refreshRate: 0, // Hz of the screen. 0 = automatic (measured from the frame times); otherwise the scrolling is timed to it
+	refreshAsked: false, // the refresh-rate question is only asked once
+	holdLite: true, // faster loading (open from memory, leave the hidden reading view for later, read ahead) and, while an arrow is held, no blur behind the header and bottom bar and the editor draws the next stretch early
 	glowColor: '', // '' = same as thumb
 	glowBlur: 8,
 	glowSpread: 1,
@@ -62,17 +66,72 @@ const MAP_STYLE = {
 	'nm-frontmatter': ['#9aa5b1', 0.75],
 };
 
-// Turns note text into one descriptor per line (class + length + indent).
-function classify(text) {
-	const lines = text.split('\n');
-	const out = [];
-	let inFront = lines.length > 0 && lines[0].trim() === '---';
-	let fence = null;
+const FENCE_RE = /^(```|~~~)/;
+const HEADING_RE = /^#{1,6}\s/;
+const HR_RE = /^(-{3,}|\*{3,}|_{3,})$/;
+const LIST_RE = /^([-*+]|\d+[.)])\s/;
+const EM_RE = /\*\*[^*]+\*\*|==[^=]+==|(^|[^*])\*[^*\s][^*]*\*/;
 
-	for (let n = 0; n < lines.length; n++) {
-		const raw = lines[n];
+// The class of one trimmed line that is not front matter or inside a code fence. The first
+// character rules out most of the patterns, so a plain line costs a couple of comparisons
+// instead of five regular expressions.
+function classifyPlain(t) {
+	if (t === '') return 'nm-blank';
+	const c = t.charCodeAt(0);
+	if (c === 35 && HEADING_RE.test(t)) {
+		let n = 1;
+		while (t.charCodeAt(n) === 35) n++;
+		return 'nm-h' + n;
+	}
+	if ((c === 45 || c === 42 || c === 95) && HR_RE.test(t)) return 'nm-hr';
+	if (c === 62) return 'nm-quote';
+	if ((c === 45 || c === 42 || c === 43 || (c >= 48 && c <= 57)) && LIST_RE.test(t)) return 'nm-list';
+	// Emphasis needs a '*' or '==' somewhere, so most lines never reach the regular expression.
+	if ((t.indexOf('*') !== -1 || t.indexOf('==') !== -1) && EM_RE.test(t)) return 'nm-em';
+	return 'nm-text';
+}
+
+// Turns note text into one descriptor per line (class + length + indent). Very long notes are
+// sampled: only every `step`-th line is described, but every line is still scanned for the front
+// matter / code fence state, so the result is exactly what describing every line and then picking
+// every `step`-th one would give, at a fraction of the work.
+function classify(text, maxRows) {
+	const len = text.length;
+	// Count the lines without creating them: only the sampled lines (and lines that can change the
+	// front matter / fence state) are ever sliced out of the text.
+	let total = 1;
+	for (let p = text.indexOf('\n'); p !== -1; p = text.indexOf('\n', p + 1)) total++;
+	const step = maxRows ? Math.max(1, Math.ceil(total / maxRows)) : 1;
+	const out = [];
+	let firstEnd = text.indexOf('\n');
+	if (firstEnd === -1) firstEnd = len;
+	let inFront = text.slice(0, firstEnd).trim() === '---';
+	let fence = null;
+	let pos = 0;
+
+	for (let n = 0; n < total; n++) {
+		let end = text.indexOf('\n', pos);
+		if (end === -1) end = len;
+		const keep = n % step === 0;
+
+		// A line that is not sampled only matters if it can change the front matter / fence state. With no
+		// such state open, that means it has to open a fence: its first real character is a backtick or
+		// tilde. Most lines start with some other plain ASCII character and are skipped without being
+		// sliced out. Anything unusual (control or non-ASCII leading characters) takes the normal path.
+		if (!keep && !inFront && fence === null) {
+			let i = pos;
+			let c = text.charCodeAt(i);
+			while (i < end && (c === 32 || c === 9)) c = text.charCodeAt(++i);
+			if (i >= end || (c > 32 && c < 127 && c !== 96 && c !== 126)) {
+				pos = end + 1;
+				continue;
+			}
+		}
+
+		const raw = text.slice(pos, end);
+		pos = end + 1;
 		const t = raw.trim();
-		let cls = 'nm-text';
+		let cls;
 
 		if (inFront) {
 			cls = 'nm-frontmatter';
@@ -80,26 +139,18 @@ function classify(text) {
 		} else if (fence) {
 			cls = 'nm-code';
 			if (t.startsWith(fence)) fence = null;
-		} else if (/^(```|~~~)/.test(t)) {
+		} else if ((t.charCodeAt(0) === 96 || t.charCodeAt(0) === 126) && FENCE_RE.test(t)) {
 			fence = t.slice(0, 3);
 			cls = 'nm-code';
-		} else if (t === '') {
-			cls = 'nm-blank';
-		} else if (/^#{1,6}\s/.test(t)) {
-			cls = 'nm-h' + t.match(/^#+/)[0].length;
-		} else if (/^(-{3,}|\*{3,}|_{3,})$/.test(t)) {
-			cls = 'nm-hr';
-		} else if (t.startsWith('>')) {
-			cls = 'nm-quote';
-		} else if (/^([-*+]|\d+[.)])\s/.test(t)) {
-			cls = 'nm-list';
-		} else if (/\*\*[^*]+\*\*|==[^=]+==|(^|[^*])\*[^*\s][^*]*\*/.test(t)) {
-			cls = 'nm-em';
+		} else if (keep) {
+			cls = classifyPlain(t);
+		} else {
+			continue; // not sampled, and it changes no state
 		}
 
-		out.push({ cls, len: t.length, indent: raw.length - raw.trimStart().length });
+		if (keep) out.push({ cls, len: t.length, indent: raw.length - raw.trimStart().length });
 	}
-	return out;
+	return { items: out, step };
 }
 
 const clamp01 = (n) => Math.min(1, Math.max(0, n));
@@ -275,7 +326,31 @@ function collectSwatchGroups(hostEl) {
 	return groups;
 }
 
+// Builds an SVG element with its attributes and children in one go.
+function svgEl(tag, attrs, kids) {
+	const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+	for (const k in attrs) el.setAttribute(k, attrs[k]);
+	if (kids) for (const c of kids) el.appendChild(c);
+	return el;
+}
+
 // Sets inline styles with !important, so nothing in a theme can override them.
+// Refresh rates screens really have. A measured frame time within 5% of one of these is treated as exactly that rate,
+// so the physics step is the same on every frame instead of wobbling with the timestamps.
+const STD_HZ = [30, 48, 50, 60, 72, 75, 90, 100, 120, 144, 165, 240];
+function nearestHz(hz) {
+	let best = 0;
+	let bd = Infinity;
+	for (const r of STD_HZ) {
+		const d = Math.abs(hz - r) / r;
+		if (d < bd) {
+			bd = d;
+			best = r;
+		}
+	}
+	return bd < 0.05 ? best : 0;
+}
+
 function lockStyle(el, styles) {
 	for (const k in styles) el.style.setProperty(k, styles[k], 'important');
 }
@@ -284,6 +359,8 @@ class NoteMinimapPlugin extends Plugin {
 	async onload() {
 		const saved = (await this.loadData()) || {};
 		this.settings = Object.assign({}, DEFAULTS, saved);
+		// Own copy: the default array is shared, and adding an exclusion would otherwise change the default itself.
+		this.settings.exclusions = Array.isArray(saved.exclusions) ? saved.exclusions.slice() : [];
 		// v2 raised the default touch sizes; upgrade anyone still on the old defaults.
 		if ((saved.ver || 1) < 2) {
 			if (saved.hitWidth === 44) this.settings.hitWidth = DEFAULTS.hitWidth;
@@ -299,7 +376,20 @@ class NoteMinimapPlugin extends Plugin {
 		// v5: bar width defaults to "automatic" (14, scaled gently per device). The old fixed
 		// defaults (18, or 14 saved as a number) become automatic; any other value you chose is kept.
 		if ((saved.ver || 1) < 5 && (saved.thumbWidth === 18 || saved.thumbWidth === 14)) this.settings.thumbWidth = null;
-		this.settings.ver = 5;
+		// v6: a gentler default hold speed. Every dropped frame (heavy maths, callouts) shows as a skip as
+		// big as one frame of travel, so a slower hold hides them. The old default becomes the new one;
+		// any other value you chose is kept.
+		if ((saved.ver || 1) < 6 && saved.holdSpeed === 1200) this.settings.holdSpeed = DEFAULTS.holdSpeed;
+		// v9: the hold speed is now one the eye can follow (about 8 degrees of view per second on a phone held at
+		// reading distance). The old default of 800 px/s crossed a whole screen in a second, which blurs.
+		if ((saved.ver || 1) < 9 && saved.holdSpeed === 800) this.settings.holdSpeed = DEFAULTS.holdSpeed;
+		// v10: "Draw ahead while holding" and "Lighter screen while holding" are one setting (holdLite). It stays on if
+		// either was on; the old key is dropped.
+		if ((saved.ver || 1) < 10) this.settings.holdLite = saved.holdLite !== false || saved.predraw === true;
+		delete this.settings.predraw;
+		delete this.settings.pageIndicator; // removed feature: clear the leftover key
+		delete this.settings.fullscreen; // removed feature: clear the leftover key
+		this.settings.ver = 10;
 		this.states = new Map();
 		this._unloaded = false;
 		this._refreshQueued = false;
@@ -328,25 +418,97 @@ class NoteMinimapPlugin extends Plugin {
 		this.registerEvent(this.app.workspace.on('file-open', () => {
 			this.setBars(false);
 			refresh();
+			this.warmSoon();
 		}));
-		this.registerEvent(this.app.workspace.on('editor-change', refreshSoon));
+		this.installLoadBoost();
+		// Only the note that was edited needs its minimap text re-read. The vault event covers changes
+		// that do not come from typing (sync, another app, the same note open in a second pane).
+		this.registerEvent(this.app.workspace.on('editor-change', (editor, info) => {
+			if (!this.needsEditRefresh()) return;
+			this.markDirty(info);
+			refreshSoon();
+		}));
+		this.registerEvent(this.app.vault.on('modify', (file) => {
+			if (!this.needsEditRefresh()) return;
+			if (this.markDirtyFile(file && file.path)) refreshSoon();
+		}));
 		// A theme or colour-scheme change: the canvas minimap has to pick up the new text colour.
 		this.registerEvent(this.app.workspace.on('css-change', () => {
 			this._mapText = null;
 			for (const st of this.states.values()) st.mapDirty = true;
 			this.queueRefresh();
 		}));
-		this.app.workspace.onLayoutReady(refresh);
+		this.app.workspace.onLayoutReady(() => {
+			refresh();
+			this.warmSoon();
+		});
 
-		// A rotation or a window resize can change the safe areas, so re-measure.
+		// Ask for the screen's refresh rate once, on a phone or tablet, as soon as the workspace is up.
+		this.app.workspace.onLayoutReady(() => {
+			this.prepBars();
+			if (!Platform.isMobile || this.settings.refreshAsked) return;
+			this._askTimer = window.setTimeout(() => {
+				this._askTimer = null;
+				if (!this._unloaded && !this.settings.refreshAsked) new RefreshRateModal(this.app, this).open();
+			}, 250);
+		});
+
 		// Settings are written to disk shortly after the last change; make sure none is lost.
 		this.registerDomEvent(document, 'visibilitychange', () => {
 			if (document.visibilityState === 'hidden') this.flushSave();
 		});
+		// Only a rotation (or a fold / unfold) changes the safe areas, so only that re-measures. Other
+		// resizes, like dragging the window or the on-screen keyboard opening, are followed by each
+		// strip's own ResizeObserver; re-measuring and re-styling everything for them just made typing
+		// on a phone stutter.
+		this._screenKey = this.screenKey();
 		this.registerDomEvent(window, 'resize', debounce(() => {
+			const key = this.screenKey();
+			if (key === this._screenKey) return;
+			this._screenKey = key;
 			this._safe = null;
 			this.refreshAll();
 		}, 250, true));
+	}
+
+	// Whether an edit needs any work at all. The scrollbar style never reads the note's text, and its thumb
+	// follows the note's height through a ResizeObserver, so typing costs it nothing here. (Switching style
+	// clears the stored text, so a minimap built later always starts from the current note.) Only a note
+	// where the observed content element could not be found still needs the light refresh.
+	needsEditRefresh() {
+		if (this.settings.style !== 'scrollbar') return true;
+		for (const st of this.states.values()) if (!st.roContent) return true;
+		return false;
+	}
+
+	screenKey() {
+		const type = screen.orientation && screen.orientation.type;
+		return (type || '') + '|' + (screen.width || 0) + 'x' + (screen.height || 0);
+	}
+
+	// The text of this note changed: its minimap has to be rebuilt. With no way to tell which note it
+	// was (an embedded editor, say) every strip is marked.
+	markDirty(info) {
+		const st = info ? this.states.get(info) : null;
+		if (st) return this.flagText(st);
+		for (const s of this.states.values()) this.flagText(s);
+	}
+
+	flagText(st) {
+		st.textDirty = true;
+		st.pending = true;
+	}
+
+	markDirtyFile(path) {
+		let hit = false;
+		if (!path) return hit;
+		for (const s of this.states.values()) {
+			if (s.file && s.file.path === path) {
+				this.flagText(s);
+				hit = true;
+			}
+		}
+		return hit;
 	}
 
 	// Workspace events, setting changes and resizes all land here: one refresh runs per tick,
@@ -356,6 +518,18 @@ class NoteMinimapPlugin extends Plugin {
 		this._refreshQueued = true;
 		queueMicrotask(() => {
 			this._refreshQueued = false;
+			if (!this._unloaded) this.refreshAll();
+		});
+	}
+
+	// Setting changes wait for the next frame instead, so a slider dragged faster than the screen
+	// refreshes still costs one restyle per frame, not one per input event.
+	queueFrameRefresh() {
+		if (this._refreshQueued || this._frameQueued) return;
+		if (document.hidden) return this.queueRefresh(); // no frames are drawn while hidden
+		this._frameQueued = true;
+		requestAnimationFrame(() => {
+			this._frameQueued = false;
 			if (!this._unloaded) this.refreshAll();
 		});
 	}
@@ -430,6 +604,8 @@ class NoteMinimapPlugin extends Plugin {
 
 	onunload() {
 		this._unloaded = true;
+		this.uninstallLoadBoost();
+		if (this._askTimer) clearTimeout(this._askTimer);
 		this.flushSave();
 		this.clearToast();
 		for (const view of Array.from(this.states.keys())) this.detach(view);
@@ -448,29 +624,374 @@ class NoteMinimapPlugin extends Plugin {
 		}
 		if (this.barsHidden === hidden) return;
 		this.barsHidden = hidden;
+		// The slide is a 0.45 s CSS transition. Draw ahead can block the page for a long frame, so it stays out of the
+		// way until the slide is over (see cruiseTick); a stalled frame in the middle of the slide reads as a snap.
+		this._barsMoveUntil = performance.now() + 520;
 		document.body.toggleClass('nm-bars-hidden', hidden);
+		if (this.settings.diagnostics) this.probeBars(hidden);
+	}
+
+	// Scroll diagnostics only: what the header really does in the moments after a slide starts. If something other than
+	// this plugin hides or moves it (a theme, Obsidian itself), the numbers show it: a transform that is already at
+	// its end after two frames, or an inline style / extra class on the header, means the slide never got to play.
+	probeBars(hidden) {
+		const hdr = document.querySelector('.workspace-leaf.mod-active .view-header') || document.querySelector('.view-header');
+		if (!hdr) return;
+		const probe = { hidden, t0: performance.now(), s: [], cls: hdr.className.replace(/\s+/g, ' ').trim(), style: hdr.getAttribute('style') || '' };
+		this._barsProbe = probe;
+		const read = () => {
+			const c = getComputedStyle(hdr);
+			const m = c.transform.match(/matrix\(([^)]+)\)/);
+			probe.s.push(Math.round(performance.now() - probe.t0) + 'ms ' + (m ? Math.round(parseFloat(m[1].split(',')[5])) : 0) + 'px/' + c.opacity);
+		};
+		requestAnimationFrame(() => requestAnimationFrame(read));
+		setTimeout(read, 120);
+		setTimeout(read, 300);
+	}
+
+	// ---- Faster loading (the loading half of Settings > Faster loading and smoother holding) ----
+	// How Obsidian opens a note (read from its app.js): the note view asks the vault to READ the file on every open,
+	// which always goes out through the native bridge to the phone's storage, even when Obsidian already holds that
+	// exact text in memory (the cachedRead copy it keeps for notes up to 64 KB, dropped the moment the file changes).
+	// It then hands the text to BOTH the editor and the reading view, so a note opened in the editor also has its whole
+	// reading view parsed and drawn, hidden, and again when you switch to it. Three changes here, all undone on unload:
+	//   1. A note whose text is already in memory is opened from memory. Bigger notes (up to 1.5 MB) get a small copy
+	//      of their own, checked against the file's time and size, and dropped on any change.
+	//   2. While the editor is showing, the hidden reading view is not filled in. Obsidian fills it in itself when you
+	//      switch to it (setMode always sets the text again), so nothing is lost.
+	//   3. Soon after a note opens and the phone is idle, the notes it links to and your recent notes are read ahead into
+	//      memory, and the editor draws the stretch just below the screen, so the first scroll does not stall.
+	// If anything here misbehaves, it switches itself off for the session and Obsidian carries on as usual.
+	installLoadBoost() {
+		if (this._boost || !this.settings.holdLite || this._boostBad) return;
+		const plugin = this;
+		const vault = this.app.vault;
+		const hasOwn = (o, k) => Object.prototype.hasOwnProperty.call(o, k);
+		const boost = {};
+		this._bstat = this._bstat || { memory: 0, disk: 0, big: 0, deferred: 0, warmed: 0, drew: 0 };
+		this._big = new Map(); // path -> { text, key } where key is the file's time and size when it was read
+		this._guard = false;
+		this._lastTouch = 0;
+		this._warmId = 0;
+		try {
+			// 1. Open from memory.
+			if (typeof vault.read === 'function' && typeof vault.cachedRead === 'function') {
+				const origRead = vault.read;
+				const origCached = vault.cachedRead;
+				boost.ownRead = hasOwn(vault, 'read');
+				boost.origRead = origRead;
+				vault.read = function (file) {
+					if (plugin._guard) {
+						plugin._bstat.disk++; // cachedRead found nothing: a real read
+						return origRead.call(this, file);
+					}
+					if (!plugin.boostFile(file)) return origRead.call(this, file);
+					const kept = plugin.bigGet(file);
+					if (kept !== null) {
+						plugin._bstat.big++;
+						return Promise.resolve(kept);
+					}
+					let p;
+					plugin._guard = true; // cachedRead calls read() when it has nothing; let that one through
+					const before = plugin._bstat.disk;
+					try {
+						p = origCached.call(this, file);
+					} finally {
+						plugin._guard = false;
+					}
+					if (plugin._bstat.disk === before) plugin._bstat.memory++;
+					const size = file.stat.size;
+					const small = plugin.app.vault.cacheLimit || 65536; // Obsidian keeps notes up to this size itself
+					const key = plugin.statKey(file);
+					return p.then((text) => {
+						if (typeof text !== 'string') return text;
+						if (size > small && size <= 1572864 && plugin.statKey(file) === key && !file.saving) plugin.bigPut(file, text, key);
+						return text;
+					});
+				};
+			}
+			// 2. Leave the hidden reading view for later.
+			const proto = MarkdownView && MarkdownView.prototype;
+			if (proto && typeof proto.setViewData === 'function') {
+				const origSet = proto.setViewData;
+				boost.ownSet = hasOwn(proto, 'setViewData');
+				boost.origSet = origSet;
+				proto.setViewData = function (data, clear) {
+					let undo = null;
+					try {
+						if (clear && !plugin._boostBad && plugin.settings.holdLite) {
+							const pm = this.modes && this.modes.preview;
+							if (pm && this.currentMode && this.currentMode !== pm && typeof pm.clear === 'function') {
+								const own = hasOwn(pm, 'set');
+								const prev = pm.set;
+								pm.set = function (text, fresh) {
+									if (fresh) this.clear(); // what the reading view does first; the text itself waits
+									plugin._bstat.deferred++;
+								};
+								undo = () => {
+									if (own) pm.set = prev;
+									else delete pm.set;
+								};
+							}
+						}
+					} catch (e) {
+						plugin._boostBad = true;
+						undo = null;
+					}
+					try {
+						return origSet.call(this, data, clear);
+					} finally {
+						if (undo) {
+							try {
+								undo();
+							} catch (e) {
+								plugin._boostBad = true;
+							}
+						}
+					}
+				};
+			}
+			this._boost = boost;
+			// Any change to a note drops our own copy of it.
+			const drop = (f, old) => {
+				if (f && f.path) this._big.delete(f.path);
+				if (typeof old === 'string') this._big.delete(old);
+			};
+			this._boostEvents = [
+				vault.on('modify', drop),
+				vault.on('delete', drop),
+				vault.on('rename', drop),
+			];
+			for (const ref of this._boostEvents) this.registerEvent(ref);
+			this._touchOn = () => {
+				this._lastTouch = performance.now();
+			};
+			document.addEventListener('touchstart', this._touchOn, { passive: true, capture: true });
+			document.addEventListener('wheel', this._touchOn, { passive: true, capture: true });
+		} catch (err) {
+			console.error('My Note Minimap: faster loading could not start', err);
+			this._boost = boost;
+			this._boostBad = true;
+			this.uninstallLoadBoost();
+		}
+	}
+
+	uninstallLoadBoost() {
+		const boost = this._boost;
+		this._boost = null;
+		this._warmId = (this._warmId || 0) + 1;
+		if (this._warmTimer) clearTimeout(this._warmTimer);
+		if (this._warmEdTimer) clearTimeout(this._warmEdTimer);
+		this._warmTimer = this._warmEdTimer = null;
+		if (this._touchOn) {
+			document.removeEventListener('touchstart', this._touchOn, { capture: true });
+			document.removeEventListener('wheel', this._touchOn, { capture: true });
+			this._touchOn = null;
+		}
+		if (this._boostEvents) {
+			for (const ref of this._boostEvents) {
+				try {
+					this.app.vault.offref(ref);
+				} catch (e) {}
+			}
+			this._boostEvents = null;
+		}
+		if (this._big) this._big.clear();
+		if (!boost) return;
+		try {
+			if (boost.origRead) {
+				if (boost.ownRead) this.app.vault.read = boost.origRead;
+				else delete this.app.vault.read;
+			}
+			if (boost.origSet) {
+				if (boost.ownSet) MarkdownView.prototype.setViewData = boost.origSet;
+				else delete MarkdownView.prototype.setViewData;
+			}
+		} catch (e) {
+			console.error('My Note Minimap: could not put loading back', e);
+		}
+	}
+
+	// Which notes the faster loading may touch: ordinary notes that are not being written right now.
+	boostFile(file) {
+		return !this._boostBad && this.settings.holdLite && !!file && file.extension === 'md' && !file.saving && !!file.stat;
+	}
+
+	statKey(file) {
+		const s = file.stat;
+		return s ? s.mtime + ':' + s.ctime + ':' + s.size : '';
+	}
+
+	bigGet(file) {
+		const e = this._big && this._big.get(file.path);
+		if (!e) return null;
+		if (e.key !== this.statKey(file) || file.saving) {
+			this._big.delete(file.path);
+			return null;
+		}
+		this._big.delete(file.path); // most recently used goes to the back
+		this._big.set(file.path, e);
+		return e.text;
+	}
+
+	bigPut(file, text, key) {
+		if (!this._big) return;
+		this._big.delete(file.path);
+		this._big.set(file.path, { text, key });
+		while (this._big.size > 3) this._big.delete(this._big.keys().next().value);
+	}
+
+	// A note just opened. Once the phone has been quiet for a moment: read ahead the notes it links to and your recent
+	// ones, then let the editor draw the stretch just below the screen.
+	warmSoon() {
+		if (!this._boost || this._boostBad || this._unloaded) return;
+		this._warmId++;
+		if (this._warmTimer) clearTimeout(this._warmTimer);
+		if (this._warmEdTimer) clearTimeout(this._warmEdTimer);
+		const id = this._warmId;
+		this._warmTimer = window.setTimeout(() => this.warmReads(id), 700);
+		this._warmEdTimer = window.setTimeout(() => this.warmEditor(id, 0), 450);
+	}
+
+	warmQuiet(id) {
+		return (
+			id === this._warmId &&
+			this._boost &&
+			!this._boostBad &&
+			!this._unloaded &&
+			this.settings.holdLite &&
+			!this._lite &&
+			document.visibilityState !== 'hidden' &&
+			performance.now() - this._lastTouch > 700
+		);
+	}
+
+	warmReads(id) {
+		this._warmTimer = null;
+		if (!this.warmQuiet(id)) return;
+		try {
+			const app = this.app;
+			const active = app.workspace.getActiveFile();
+			if (!active) return;
+			const paths = [];
+			const links = app.metadataCache.resolvedLinks && app.metadataCache.resolvedLinks[active.path];
+			if (links) paths.push(...Object.keys(links).sort((a, b) => links[b] - links[a]).slice(0, 6));
+			const recent = app.workspace.getLastOpenFiles ? app.workspace.getLastOpenFiles() : [];
+			for (const p of recent.slice(0, 5)) if (!paths.includes(p)) paths.push(p);
+			const files = [];
+			for (const p of paths) {
+				const f = app.vault.getAbstractFileByPath(p);
+				if (f && f !== active && f.extension === 'md' && f.stat && f.stat.size <= 1572864) files.push(f);
+				if (files.length >= 8) break;
+			}
+			const next = () => {
+				if (!this.warmQuiet(id)) return;
+				const f = files.shift();
+				if (!f) return;
+				const again = () => {
+					this._bstat.warmed++;
+					this._warmTimer = window.setTimeout(next, 150);
+				};
+				try {
+					app.vault.read(f).then(again, again); // goes through our read: kept in memory for the next open
+				} catch (e) {
+					again();
+				}
+			};
+			next();
+		} catch (err) {
+			this._boostBad = true;
+			console.error('My Note Minimap: read-ahead switched off', err);
+		}
+	}
+
+	warmEditor(id, pass) {
+		this._warmEdTimer = null;
+		if (!this.warmQuiet(id)) return;
+		try {
+			const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+			const st = view && this.states.get(view);
+			const sc = st && st.scroller;
+			if (!sc || !sc.isConnected || st.cmBad || st.boundMode === 'preview' || performance.now() < (this._barsMoveUntil || 0)) return;
+			st.peekWait = 0;
+			const y = sc.scrollTop;
+			if (this.drawAhead(st, y, 1, sc.clientHeight)) {
+				sc.scrollTop = y; // straight back, before anything is painted
+				this._bstat.drew++;
+				if (!st.cmBad && st.peekWait < 30 && pass < 2) {
+					this._warmEdTimer = window.setTimeout(() => this.warmEditor(id, pass + 1), 220);
+				}
+			}
+		} catch (err) {
+			this._boostBad = true;
+			console.error('My Note Minimap: editor draw-ahead switched off', err);
+		}
+	}
+
+	loadLine() {
+		const b = this._bstat;
+		if (!this.settings.holdLite || !this._boost || !b) return '';
+		return 'Loading: ' + b.memory + ' from memory' + (b.big ? ', ' + b.big + ' long' : '') + ', ' + b.deferred + ' reading views left for later, ' + b.warmed + ' read ahead, editor drew ahead ' + b.drew + 'x' + (this._boostBad ? ' (switched off)' : '') + '\n';
+	}
+
+	// The "lighter screen" half of the hold setting (the other half is drawAhead). While an arrow is held, the whole
+	// screen scrolls under the header and bottom bar. If a theme blurs what is behind them, the phone's graphics chip
+	// has to redo that blur on every single frame. A class on the body switches the blur off until the note has
+	// stopped moving.
+	liteOn() {
+		if (this._lite || !this.settings.holdLite) return;
+		this._lite = true;
+		document.body.addClass('nm-hold-lite');
+	}
+
+	liteOff() {
+		if (!this._lite) return;
+		this._lite = false;
+		document.body.removeClass('nm-hold-lite');
 	}
 
 	releaseBars() {
+		this.liteOff();
 		this.setBars(false);
 		this._barsCls = false;
 		document.body.removeClass('nm-animate-bars');
 	}
 
+	// Puts the header and bottom bar on their own layers ahead of time. Doing it on the first frame of the
+	// first scroll made that frame slow; doing it when the finger lands (before anything moves) does not.
+	prepBars() {
+		if (!this.settings.animateBars || this._barsCls) return;
+		this._barsCls = true;
+		document.body.addClass('nm-animate-bars');
+	}
+
 	// Called every frame the engine moves the note. Down hides, up (or the very top) shows.
+	// (Same logic as the earlier 1.4.x releases, whose slide the header and bottom bar animated smoothly with.)
 	trackBars(st, pos) {
 		if (!this.settings.animateBars) return;
-		if (!this._barsCls) {
-			this._barsCls = true;
-			document.body.addClass('nm-animate-bars');
-		}
+		this.prepBars();
 		const d = pos - st.barLast;
 		st.barLast = pos;
+		// The press restyles the strip, starts the arrow's animations (0.45 s) and ramps the speed up. Starting the
+		// bars' slide in those same frames piles everything onto the start of the hold and shows as jitter, so the
+		// bars wait until the hold is under way. This only changes WHEN the slide starts, not how it looks.
+		if (st.hold && st.holdT < 0.5) {
+			st.barAcc = 0;
+			return;
+		}
 		if (d === 0) return;
 		if ((d > 0) !== (st.barAcc > 0)) st.barAcc = 0; // direction changed
 		st.barAcc += d;
-		if (pos < 12 || st.barAcc < -14) this.setBars(false);
-		else if (st.barAcc > 36) this.setBars(true);
+		// Never reverse a slide that has only just begun: a small wobble in direction would start and cancel
+		// transitions back to back, and every restart is a visible hitch. Reaching the top is exempt.
+		const want = pos < 12 || st.barAcc < -14 ? false : st.barAcc > 36 ? true : null;
+		if (want !== null && want !== this.barsHidden) {
+			const t = performance.now();
+			if (pos < 12 || !this._barsT || t - this._barsT > 280) {
+				this._barsT = t;
+				this.setBars(want);
+			}
+		}
 		// Safety net: whatever stops the note, the bars always come back once movement ceases.
 		if (this.barsHidden) {
 			const t = performance.now();
@@ -507,7 +1028,8 @@ class NoteMinimapPlugin extends Plugin {
 		this._toastT = setTimeout(() => {
 			this._toastT = null;
 			el.addClass('nm-toast-out');
-			setTimeout(() => {
+			this._toastT = setTimeout(() => {
+				this._toastT = null;
 				el.remove();
 				if (this._toastEl === el) this._toastEl = null;
 			}, 200);
@@ -569,35 +1091,22 @@ class NoteMinimapPlugin extends Plugin {
 	// the scrollbar is hidden. Both parts are drawn and animated by CSS (see styles.css).
 	decorateButton(btn) {
 		btn.addClass('nm-hand-btn');
-		const NS = 'http://www.w3.org/2000/svg';
 		const eye = document.createElement('span');
 		eye.className = 'nm-eye';
-		const svg = document.createElementNS(NS, 'svg');
-		svg.setAttribute('viewBox', '0 0 24 24');
-		svg.setAttribute('fill', 'none');
-		svg.setAttribute('stroke', 'currentColor');
-		svg.setAttribute('stroke-width', '2.6');
-		svg.setAttribute('stroke-linecap', 'round');
-		svg.setAttribute('stroke-linejoin', 'round');
-		const shape = document.createElementNS(NS, 'g');
-		shape.setAttribute('class', 'nm-eye-shape');
-		const outline = document.createElementNS(NS, 'path');
-		outline.setAttribute('d', 'M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z');
-		const pupil = document.createElementNS(NS, 'circle');
-		pupil.setAttribute('cx', '12');
-		pupil.setAttribute('cy', '12');
-		pupil.setAttribute('r', '3');
-		shape.appendChild(outline);
-		shape.appendChild(pupil);
-		const slash = document.createElementNS(NS, 'line');
-		slash.setAttribute('class', 'nm-eye-slash');
-		slash.setAttribute('x1', '3.5');
-		slash.setAttribute('y1', '3.5');
-		slash.setAttribute('x2', '20.5');
-		slash.setAttribute('y2', '20.5');
-		slash.setAttribute('pathLength', '1');
-		svg.appendChild(shape);
-		svg.appendChild(slash);
+		const svg = svgEl('svg', {
+			viewBox: '0 0 24 24',
+			fill: 'none',
+			stroke: 'currentColor',
+			'stroke-width': '2.6',
+			'stroke-linecap': 'round',
+			'stroke-linejoin': 'round',
+		});
+		const shape = svgEl('g', { class: 'nm-eye-shape' }, [
+			svgEl('path', { d: 'M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z' }),
+			svgEl('circle', { cx: '12', cy: '12', r: '3' }),
+		]);
+		const slash = svgEl('line', { class: 'nm-eye-slash', x1: '3.5', y1: '3.5', x2: '20.5', y2: '20.5', pathLength: '1' });
+		svg.append(shape, slash);
 		eye.appendChild(svg);
 		btn.appendChild(eye);
 		this.addNotch(btn);
@@ -607,30 +1116,13 @@ class NoteMinimapPlugin extends Plugin {
 	addNotch(btn) {
 		const icon = btn.querySelector('svg.svg-icon');
 		if (!icon) return;
-		const NS = 'http://www.w3.org/2000/svg';
 		const id = 'nm-notch-' + Math.random().toString(36).slice(2, 9);
-		const defs = document.createElementNS(NS, 'defs');
-		const mask = document.createElementNS(NS, 'mask');
-		mask.setAttribute('id', id);
-		mask.setAttribute('maskUnits', 'userSpaceOnUse');
-		mask.setAttribute('x', '0');
-		mask.setAttribute('y', '0');
-		mask.setAttribute('width', '24');
-		mask.setAttribute('height', '24');
-		const full = document.createElementNS(NS, 'rect');
-		full.setAttribute('width', '24');
-		full.setAttribute('height', '24');
-		full.setAttribute('fill', '#fff');
-		const hole = document.createElementNS(NS, 'circle');
-		hole.setAttribute('class', 'nm-notch');
-		hole.setAttribute('cx', '19.2');
-		hole.setAttribute('cy', '19.2');
-		hole.setAttribute('fill', '#000');
-		mask.appendChild(full);
-		mask.appendChild(hole);
-		defs.appendChild(mask);
-		const g = document.createElementNS(NS, 'g');
-		g.setAttribute('mask', 'url(#' + id + ')');
+		const mask = svgEl('mask', { id, maskUnits: 'userSpaceOnUse', x: '0', y: '0', width: '24', height: '24' }, [
+			svgEl('rect', { width: '24', height: '24', fill: '#fff' }),
+			svgEl('circle', { class: 'nm-notch', cx: '19.2', cy: '19.2', fill: '#000' }),
+		]);
+		const defs = svgEl('defs', {}, [mask]);
+		const g = svgEl('g', { mask: 'url(#' + id + ')' });
 		while (icon.firstChild) g.appendChild(icon.firstChild);
 		icon.appendChild(defs);
 		icon.appendChild(g);
@@ -649,7 +1141,7 @@ class NoteMinimapPlugin extends Plugin {
 				this.buttons.set(view, btn);
 			}
 		}
-		for (const [view, btn] of Array.from(this.buttons.entries())) {
+		for (const [view, btn] of this.buttons) {
 			if (!live.has(view)) {
 				btn.remove();
 				this.buttons.delete(view);
@@ -661,8 +1153,8 @@ class NoteMinimapPlugin extends Plugin {
 	// The button is highlighted while the touch area is on.
 	refreshButtons() {
 		const on = this.settings.touchEnabled;
+		const k = on + '|' + this.settings.hideScrollbar;
 		for (const btn of this.buttons.values()) {
-			const k = on + '|' + this.settings.hideScrollbar;
 			if (btn._nmOn === k) continue;
 			btn._nmOn = k;
 			btn.toggleClass('is-active', on);
@@ -681,7 +1173,7 @@ class NoteMinimapPlugin extends Plugin {
 	}
 
 	async saveSettings() {
-		this.queueRefresh();
+		this.queueFrameRefresh();
 		this.saveDirty = true;
 		this.saveSoon();
 	}
@@ -694,16 +1186,27 @@ class NoteMinimapPlugin extends Plugin {
 
 	// Light refresh used while typing: only what depends on the note's text or height.
 	refreshContent() {
-		for (const [view, st] of Array.from(this.states.entries())) {
-			if (this.settings.style === 'scrollbar') this.updateViewport(st);
+		for (const [view, st] of this.states) {
+			// Only notes that actually changed. The rest keep their strip as it is.
+			if (!st.pending) continue;
+			if (this.settings.style === 'scrollbar') {
+				// The thumb follows the note's height through the ResizeObserver on its content; this is
+				// only a fallback for a note where that element could not be found.
+				if (!st.roContent) this.updateViewport(st);
+				st.pending = false;
+			}
 			// Fast rendering: a note in a background tab is rebuilt when it is shown again, not while
-			// you type in another one.
+			// you type in another one. It stays marked, so it is rebuilt then.
 			else if (this.settings.fastRender && view.containerEl.offsetParent === null) continue;
-			else this.update(view);
+			else {
+				st.pending = false;
+				this.update(view);
+			}
 		}
 	}
 
 	isExcluded(path) {
+		if (!this.settings.exclusions.length) return false;
 		return this.settings.exclusions.some((ex) => {
 			const e = ex.replace(/\/+$/, '');
 			return path === e || path.startsWith(e + '/');
@@ -719,7 +1222,7 @@ class NoteMinimapPlugin extends Plugin {
 			live.add(view);
 			this.update(view);
 		}
-		for (const view of Array.from(this.states.keys())) {
+		for (const view of this.states.keys()) {
 			if (!live.has(view)) this.detach(view);
 		}
 		this.syncButtons(live);
@@ -753,6 +1256,7 @@ class NoteMinimapPlugin extends Plugin {
 		el.createDiv({ cls: 'nm-arrow nm-arrow-down' });
 
 		const st = {
+			view, // the note this strip belongs to (its editor is asked to draw ahead during a hold)
 			host,
 			el,
 			linesEl,
@@ -761,6 +1265,10 @@ class NoteMinimapPlugin extends Plugin {
 			onScroll: null,
 			onUser: null,
 			text: null,
+			file: null, // the note this strip was last built for
+			textDirty: true, // the note's text may have changed since the minimap was built
+			pending: false, // an edit is waiting for the next light refresh
+			lastVpTop: null,
 			stripH: 0,
 			stripTop: 0,
 			vpH: 0,
@@ -781,6 +1289,9 @@ class NoteMinimapPlugin extends Plugin {
 			hold: 0, // -1 / 0 / 1 while an arrow is held down
 			holdT: 0, // seconds since the arrow was pressed
 			holdGoal: 0, // where a plain tap should end up
+			cruise: false, // an arrow is held and the hold engine (not the spring) is moving the note
+			cv: 0, // cruise speed, px per second, always >= 0 (the direction is st.hold)
+			cv0: 0, // speed the cruise started from
 			repeatTimer: null,
 			repeat: null,
 			lead: false, // thumb follows the finger instantly while dragging it
@@ -788,7 +1299,6 @@ class NoteMinimapPlugin extends Plugin {
 			roContent: null,
 			rows: [],
 			items: null, // classified lines, kept for the canvas minimap
-			step: 1,
 			canvas: null,
 			ctx: null,
 			cvW: 0,
@@ -806,6 +1316,8 @@ class NoteMinimapPlugin extends Plugin {
 			vpQueued: false,
 			dead: false,
 			noScroll: null,
+			rect: null, // the strip's box, cached while it is pressed
+			rectT: 0,
 			atTop: null,
 			atBottom: null,
 			ro: null,
@@ -813,8 +1325,10 @@ class NoteMinimapPlugin extends Plugin {
 
 		st.onScroll = () => this.queueViewport(st);
 		// If the finger or wheel scrolls the note itself, stop gliding and let it.
+		// This fires for every wheel notch and every touch on the note, so when the engine is already idle it does
+		// nothing but the (cheap) bars check, instead of cancelling timers and stripping classes each time.
 		st.onUser = () => {
-			this.engineStop(st);
+			if (st.running || st.hold || st.lead || st.holdOn || st.repeat || st.repeatTimer || st.pressTimer) this.engineStop(st);
 			this.settleBars();
 		};
 		st.tick = (now) => this.tick(st, now);
@@ -822,9 +1336,21 @@ class NoteMinimapPlugin extends Plugin {
 		const sbMode = () => this.settings.style === 'scrollbar';
 
 		// The scrollTop the note should have for a pointer position on the strip.
+		// The strip's box is read once per press and then reused: a pointer event can arrive several times
+		// per frame, and each fresh read right after the engine wrote scrollTop could force a layout. It is
+		// dropped when the strip resizes, and re-read at most every 250 ms during a drag as a safety net.
+		const rectOf = (fresh) => {
+			const now = performance.now();
+			if (fresh || !st.rect || now - st.rectT > 250) {
+				st.rect = el.getBoundingClientRect();
+				st.rectT = now;
+			}
+			return st.rect;
+		};
+
 		const targetFor = (e) => {
 			const sc = st.scroller;
-			const rect = el.getBoundingClientRect();
+			const rect = rectOf(false);
 			if (sbMode()) {
 				const track = Math.max(1, st.trackH - st.vpH);
 				const frac = clamp01((e.clientY - rect.top - st.arrow - st.grab) / track);
@@ -841,15 +1367,16 @@ class NoteMinimapPlugin extends Plugin {
 
 		el.addEventListener('pointerdown', (e) => {
 			e.preventDefault();
-			this.bindScroller(view, st);
+			this.ensureScroller(view, st);
 			if (!st.scroller || !st.stripH) return;
+			st.downId = e.pointerId;
 			try {
 				el.setPointerCapture(e.pointerId);
 			} catch (err) {
 				/* ignore */
 			}
 
-			const rect = el.getBoundingClientRect();
+			const rect = rectOf(true);
 			const y = e.clientY - rect.top;
 
 			// Arrow buttons: tap to glide one step, hold to keep scrolling.
@@ -858,32 +1385,54 @@ class NoteMinimapPlugin extends Plugin {
 				if (y > rect.height - st.arrow) return this.startHold(st, 1);
 			}
 
+			this.endHold(st);
 			st.dragging = true;
+			st.lastY = e.clientY;
 			el.addClass('note-minimap-dragging');
 			// Grabbing the thumb keeps it under the finger; tapping the track glides there.
 			const onThumb = y >= st.vpTop && y <= st.vpTop + st.vpH;
 			st.grab = sbMode() ? (onThumb ? y - st.vpTop : st.vpH / 2) : 0;
 			st.lead = sbMode() && onThumb;
+			this.prepBars();
 			this.glide(st, targetFor(e), onThumb ? this.dragOmega() : this.glideOmega());
 			this.updateViewport(st);
 		});
 
 		el.addEventListener('pointermove', (e) => {
 			if (st.dragging && st.scroller) {
+				if (e.clientY === st.lastY) return;
+				st.lastY = e.clientY;
+				// glide() either moves the note and the thumb itself (smooth scrolling off) or starts the
+				// engine, whose next frame redraws the thumb before the screen is painted, so redrawing it
+				// here as well would only repeat the same style writes for every extra pointer event.
 				this.glide(st, targetFor(e), this.dragOmega());
-				this.updateViewport(st, st.running ? st.pos : undefined);
 			}
 		});
 
-		const stop = () => {
+		const stop = (e) => {
+			st.rect = null;
 			st.dragging = false;
 			el.removeClass('note-minimap-dragging');
-			this.endHold(st);
+			this.endHold(st, e && e.type);
 			if (!st.running) st.lead = false; // otherwise cleared once the note settles
 		};
 		el.addEventListener('pointerup', stop);
 		el.addEventListener('pointercancel', stop);
-		el.addEventListener('lostpointercapture', stop);
+		// The browser can drop the capture while the finger is still down (the strip being restyled or re-attached,
+		// say). That used to end the hold on the spot, so the note stopped dead under a finger that had not moved.
+		// Take the capture back; if the pointer really is gone this throws and the hold ends as before.
+		el.addEventListener('lostpointercapture', (e) => {
+			if ((st.hold || st.dragging) && e.pointerId === st.downId) {
+				try {
+					el.setPointerCapture(e.pointerId);
+					if (st.diag) st.diag.recaptured++;
+					return;
+				} catch (err) {
+					/* the pointer is gone */
+				}
+			}
+			stop(e);
+		});
 
 		el.addEventListener(
 			'wheel',
@@ -898,9 +1447,17 @@ class NoteMinimapPlugin extends Plugin {
 			{ passive: false }
 		);
 
-		st.ro = new ResizeObserver(() => {
+		st.ro = new ResizeObserver((entries) => {
 			st.mx = null;
-			st.cvDirty = true;
+			st.rect = null;
+			// The canvas depends on the strip's size, not on how tall the note's text is. The note's content
+			// changes height on almost every edit, so that alone must not trigger a redraw of the canvas.
+			for (const en of entries) {
+				if (en.target !== st.roContent) {
+					st.cvDirty = true;
+					break;
+				}
+			}
 			if (!st.running) this.updateViewport(st); // while running, the next frame re-reads and redraws
 		});
 		st.ro.observe(host);
@@ -958,6 +1515,7 @@ class NoteMinimapPlugin extends Plugin {
 	glide(st, target, omega) {
 		const sc = st.scroller;
 		if (!sc) return;
+		if (st.cruise) this.cruiseToSpring(st); // something else wants the note: the hold gives way to the spring
 		const mx0 = this.readMetrics(st, !st.running);
 		const max = Math.max(0, mx0.sh - mx0.ch);
 		st.target = Math.min(max, Math.max(0, target));
@@ -969,17 +1527,21 @@ class NoteMinimapPlugin extends Plugin {
 			this.updateViewport(st);
 			return;
 		}
-		if (!st.running) {
-			this.readMetrics(st, true);
-			st.pos = sc.scrollTop;
-			st.vel = 0;
-			st.barLast = st.pos;
-			st.barAcc = 0;
-			st.running = true;
-			st.lastWrite = st.pos;
-			st.lastT = performance.now();
-			st.raf = requestAnimationFrame(st.tick);
-		}
+		if (!st.running) this.engineStart(st);
+	}
+
+	engineStart(st) {
+		const sc = st.scroller;
+		st.pos = sc.scrollTop;
+		st.vel = 0;
+		st.barLast = st.pos;
+		st.barAcc = 0;
+		st.dtN = 0;
+		st.dtI = 0;
+		st.running = true;
+		st.lastWrite = st.pos;
+		st.lastT = performance.now();
+		st.raf = requestAnimationFrame(st.tick);
 	}
 
 	tick(st, now) {
@@ -988,23 +1550,59 @@ class NoteMinimapPlugin extends Plugin {
 			st.running = false;
 			return;
 		}
-		const dt = Math.min(0.034, Math.max(0.001, (now - st.lastT) / 1000));
+		const rawDt = (now - st.lastT) / 1000;
 		st.lastT = now;
+		const dt = this.frameDt(st, rawDt);
+		st.dtLast = dt;
+		const t0 = st.diag ? performance.now() : 0;
+		if (st.diag) {
+			const ms = rawDt * 1000;
+			st.diag.frames++;
+			st.diag.sum += ms;
+			if (st.period && ms > st.period * 1500) {
+				st.diag.late++;
+				// If the plugin's own last frame took more than half a refresh period, the delay is partly ours;
+				// otherwise the time went to the note (editor drawing, maths) or to the screen itself.
+				if (st.diag.prevWork > st.period * 500) st.diag.lateOurs++;
+				else st.diag.lateOther++;
+			}
+			if (ms > st.diag.worst) st.diag.worst = ms;
+		}
+
+		if (st.cruise) return this.cruiseTick(st, rawDt, dt, t0);
 
 		// CodeMirror re-measures line heights as new lines scroll into view and nudges scrollTop
 		// to keep the text steady. If we then write our own stale position, the note visibly
 		// jumps back. Notice any outside change and carry the spring along with it.
+		//
+		// Every one of these nudges has to be followed, however small. The ResizeObserver clears the
+		// cached metrics right after each re-measure, which is exactly when a nudge happens, so the
+		// metrics are read first (cheap: nothing has been written yet this frame) instead of trusting
+		// a cache that is empty at the moment it matters. A nudge that was ignored because the cache
+		// was empty and the nudge was under 1.5 px made the note jump back by that much, over and
+		// over, while an arrow was held. That was the jitter.
+		// Our own writes land on whole device pixels (below), so the browser hands back what we wrote
+		// to within a thousandth of a pixel and anything beyond a fraction of a device pixel is
+		// somebody else's move. Only right at the ends of the note, where the browser clamps to the
+		// real end and a rounding difference could keep the engine awake, is the looser 1.5 px kept.
+		let mx = this.readMetrics(st);
 		if (st.lastWrite !== undefined && st.lastWrite !== null) {
 			const drift = sc.scrollTop - st.lastWrite;
-			if (Math.abs(drift) > 1.5) {
+			const endMax = Math.max(0, mx.sh - mx.ch);
+			const midNote = st.pos > 2 && st.pos < endMax - 2;
+			const limit = midNote ? Math.max(0.1, 0.35 / (window.devicePixelRatio || 1)) : 1.5;
+			if (Math.abs(drift) > limit) {
 				st.pos += drift;
 				st.target += drift;
 				st.holdGoal += drift;
 				st.barLast += drift;
-				st.mx = null;
+				mx = this.readMetrics(st, true); // the note's height changed with it
+				if (st.diag) {
+					st.diag.nudges++;
+					st.diag.nudgePx += Math.abs(drift);
+				}
 			}
 		}
-		const mx = this.readMetrics(st);
 		const max = Math.max(0, mx.sh - mx.ch);
 
 		// Arrow held down: after a short delay the target starts moving, easing up to
@@ -1017,10 +1615,20 @@ class NoteMinimapPlugin extends Plugin {
 				st.el.addClass('nm-holding');
 			}
 			const u = clamp01(st.holdT / 0.3);
-			const ease = u * u * (3 - 2 * u); // smoothstep: no sudden jolt as the hold ramps to full speed
-			st.target = Math.min(max, Math.max(0, st.target + st.hold * this.settings.holdSpeed * ease * dt));
+			const ramp = u * u * (3 - 2 * u); // smoothstep: no sudden jolt as the hold ramps to full speed
+			// The target starts moving at once, at a third of full speed, and the spring follows it. There is no
+			// separate first push any more: that push followed by a slow ramp made two bumps in the speed right
+			// after the press, which showed as a small stutter before the hold settled.
+			const ease = 0.35 + 0.65 * ramp;
+			// When every frame lasts exactly one refresh period, make each frame's travel a whole number of screen
+			// pixels. A step like 35.4 px gets written as 35, 36, 35, 35, 36 and shows as a faint shimmer in the text;
+			// 35 px every frame is perfectly even. The speed changes by less than half a pixel per frame (about 1%).
+			const unit = st.unit || 1 / (window.devicePixelRatio || 1);
+			let stepPx = this.settings.holdSpeed * dt;
+			if (st.dtSteady) stepPx = Math.max(1, Math.round(stepPx / unit)) * unit;
+			st.target = Math.min(max, Math.max(0, st.target + st.hold * stepPx * ease));
 			const g = this.glideOmega();
-			st.omega = g + (Math.min(40, Math.max(22, g * 1.4)) - g) * ease;
+			st.omega = g + (Math.min(40, Math.max(22, g * 1.4)) - g) * ramp;
 		}
 
 		// Exact step of a critically damped spring (stable at any frame time).
@@ -1049,26 +1657,395 @@ class NoteMinimapPlugin extends Plugin {
 			st.lead = false;
 			sc.scrollTop = st.pos;
 			st.lastWrite = null;
+			this.liteOff();
 			this.updateViewport(st);
 			this.trackBars(st, st.pos);
 			this.settleBars();
 			return;
 		}
 
-		sc.scrollTop = st.pos;
-		st.lastWrite = st.pos;
+		// Write a whole number of device pixels. A fractional position gets rounded by the browser
+		// anyway (and not always the same way), which makes the text shimmer and hides how far the
+		// browser really moved. The thumb below still uses the exact position. The small +0.001 keeps
+		// a browser that rounds down from landing one pixel short on a value like 1234.99999.
+		const dpr = window.devicePixelRatio || 1;
+		const unit = st.unit || 1 / dpr;
+		const snapped = Math.round(st.pos / unit) * unit + 0.001 * unit;
+		sc.scrollTop = snapped;
+		// Remember what the browser actually kept, not what we asked for. Webviews differ in how they round
+		// a scroll position (device pixels, whole pixels, down), and a different rounding must never look like
+		// somebody else moving the note. Nothing has changed layout yet, so this read is cheap.
+		st.lastWrite = sc.scrollTop;
+		// Some webviews keep only whole CSS pixels of a scroll position. Then steps of a third of a pixel would
+		// be rounded again by the browser, unevenly. Watch what comes back for a few frames and, if it is always
+		// a whole number while what we asked for was not, use whole pixels as the grid from then on.
+		if (!st.unitKnown && Math.abs(snapped - Math.round(snapped)) > 0.01) {
+			st.uSeen = (st.uSeen || 0) + 1;
+			if (Math.abs(st.lastWrite - Math.round(st.lastWrite)) < 0.01) st.uInt = (st.uInt || 0) + 1;
+			if (st.uSeen >= 12) {
+				st.unitKnown = true;
+				if (dpr !== 1 && st.uInt / st.uSeen > 0.9) st.unit = 1;
+			}
+		}
 		this.updateViewport(st, st.pos);
 		this.trackBars(st, st.pos);
+		if (st.diag) {
+			const c = performance.now() - t0;
+			st.diag.work += c;
+			st.diag.prevWork = c;
+			if (c > st.diag.workWorst) st.diag.workWorst = c;
+		}
 		st.raf = requestAnimationFrame(st.tick);
 	}
 
+	// ---- Holding an arrow: the cruise engine ---------------------------------
+	// While an arrow is down the note is NOT chased by a spring any more. The old design moved a target and let
+	// a spring follow it, and it re-read scrollTop after every write; any nudge from the editor (line heights
+	// being re-measured) or any rounding by the webview was then folded back into the target, which showed as
+	// jitter, and at worst cancelled a whole frame's travel so the note seemed to refuse to move.
+	//
+	// Now the engine owns one number, the position, and moves it by speed x real elapsed time:
+	//  - the speed climbs from where it was to the hold speed along a smoothstep, so there is no jolt;
+	//  - every frame reads first (scrollTop, heights) and writes once at the end, and never reads back what it
+	//    just wrote, so the frame has no forced layout in the middle of it;
+	//  - the editor is only "moving the note itself" if scrollTop is more than a full CSS pixel away from what
+	//    we wrote (rounding by a webview is never that big); a clamp at the end of the note counts the same way,
+	//    so a note whose height estimate grows as you scroll just keeps going;
+	//  - on release the spring takes over with the speed we had, so the note coasts to a soft stop, and a tap
+	//    still ends one full step further on.
+
+	// Hold speed, nudged so one frame's travel is a whole number of device pixels: 35.4 px a frame written as
+	// 35, 36, 35, 35, 36 shows as a faint shimmer; 35 every frame does not. At most about 3% off.
+	cruiseSpeed(st) {
+		const v = Math.max(50, this.settings.holdSpeed);
+		if (!st.periodKnown || !st.period) return v;
+		const unit = st.unit || 1 / (window.devicePixelRatio || 1);
+		return (Math.max(1, Math.round((v * st.period) / unit)) * unit) / st.period;
+	}
+
+	cruiseTick(st, rawDt, steadyDt, t0) {
+		const sc = st.scroller;
+		const dpr = window.devicePixelRatio || 1;
+		const unit = st.unit || 1 / dpr;
+
+		// ---- reads, all before the write ----
+		const obs = sc.scrollTop;
+		const sh = Math.max(1, sc.scrollHeight);
+		const ch = sc.clientHeight;
+		// The metrics object is updated in place: a new one every frame is garbage the phone has to collect mid-hold.
+		const mxNow = performance.now();
+		let m = st.mx;
+		if (m) {
+			m.sh = sh;
+			m.ch = ch;
+			m.t = mxNow;
+		} else {
+			m = st.mx = { sh, ch, mapH: st.el.clientHeight, t: mxNow };
+		}
+		const max = Math.max(0, sh - ch);
+		if (st.diag) {
+			// How long the reads took: if the page's layout was out of date, the first read pays for all of it.
+			const r = performance.now() - t0;
+			if (r > st.diag.readWorst) {
+				st.diag.readWorst = r;
+				st.diag.readAt = st.holdT;
+			}
+		}
+
+		// Did the webview keep what we asked for to the whole CSS pixel? If so, step on whole pixels from here on.
+		if (st.lastWrite !== null && !st.unitKnown && Math.abs(st.lastWrite - Math.round(st.lastWrite)) > 0.01) {
+			st.uSeen = (st.uSeen || 0) + 1;
+			if (Math.abs(obs - Math.round(obs)) < 0.01) st.uInt = (st.uInt || 0) + 1;
+			if (st.uSeen >= 12) {
+				st.unitKnown = true;
+				if (dpr !== 1 && st.uInt / st.uSeen > 0.9) st.unit = 1;
+			}
+		}
+
+		// ---- somebody else moved the note (or the end clamped our write): follow, never fight ----
+		if (st.lastWrite !== null) {
+			const d = obs - st.lastWrite;
+			if (Math.abs(d) > 1) {
+				st.pos += d;
+				st.holdGoal += d;
+				st.barLast += d;
+				if (st.diag) {
+					st.diag.nudges++;
+					st.diag.nudgePx += Math.abs(d);
+				}
+			}
+		}
+
+		// ---- time: the frame length when frames are even, otherwise what really elapsed ----
+		// A hitch (the editor drawing new lines, say) must not turn into a leap: the frame after it would move the note
+		// two or three frames' worth at once. At most 1.6 frames' worth is taken at a time, and the rest is paid back
+		// over the next frames at up to 30% extra speed, so the hitch reads as a short slow-down that catches up.
+		if (st.diag && st.periodKnown && rawDt > st.period * 1.4) {
+			// Remember when (and where in the note) late frames happen, to see whether they repeat.
+			const L = st.diag.lateAt;
+			if (L.length < 300 && (!L.length || st.holdT - L[L.length - 1][0] > 0.1)) L.push([st.holdT, st.pos]);
+		}
+		const base = st.dtSteady ? steadyDt : Math.min(0.1, Math.max(0.001, rawDt));
+		const per = st.periodKnown && st.period ? st.period : 1 / 60;
+		let dt = Math.min(base, per * 1.6);
+		st.debt = Math.min(0.2, (st.debt || 0) + base - dt);
+		if (st.debt > 0 && base <= per * 1.05) {
+			const pay = Math.min(st.debt, dt * 0.3);
+			dt += pay;
+			st.debt -= pay;
+		}
+		st.dtLast = dt;
+		st.holdT += dt;
+		if (st.holdT > 0.35 && !st.holdOn) {
+			st.holdOn = true;
+			st.el.addClass('nm-holding');
+		}
+
+		// ---- speed: smoothstep from the starting speed up to the hold speed ----
+		const vmax = this.cruiseSpeed(st);
+		const u = clamp01(st.holdT / 0.4);
+		const ramp = u * u * (3 - 2 * u);
+		const v0 = Math.min(st.cv0, vmax);
+		const vPrev = st.cv;
+		st.cv = v0 + (vmax - v0) * ramp;
+
+		// ---- position: distance = average speed over the frame x time ----
+		const dir = st.hold;
+		let pos = st.pos + dir * 0.5 * (vPrev + st.cv) * dt;
+		pos = Math.min(max, Math.max(0, pos));
+		st.pos = pos;
+
+		// ---- the one write ----
+		let snapped = Math.round(pos / unit) * unit + 0.001 * unit;
+		st.peekComp = 0;
+		// Draw ahead stays out of the way of the header / bottom bar. It waits for the press-in animations (0.5 s), and
+		// while the bars are animating it does nothing: not before the slide (going down, the bars have not left yet, so
+		// the peek would land on the very frame the slide starts), not during it, and not just after it.
+		const barsQuiet = !this.settings.animateBars || (this.barsHidden === dir > 0 && mxNow >= (this._barsMoveUntil || 0) + 150);
+		const peeked = this.settings.holdLite && st.holdT > 0.5 && barsQuiet && this.drawAhead(st, snapped, dir, ch);
+		if (peeked && Math.abs(st.peekComp) > 1) {
+			// While the editor drew ahead it shifted the note to keep what is on screen steady (line heights changed).
+			// Carry that over, so putting the position back does not undo it.
+			pos += st.peekComp;
+			st.pos = pos;
+			st.holdGoal += st.peekComp;
+			st.barLast += st.peekComp;
+			snapped = Math.round(pos / unit) * unit + 0.001 * unit;
+		}
+		if (peeked || snapped !== st.lastWrite) sc.scrollTop = snapped;
+		st.lastWrite = snapped;
+
+		this.updateViewport(st, pos);
+		this.trackBars(st, pos);
+		if (st.diag) {
+			const c = performance.now() - t0;
+			st.diag.work += c;
+			st.diag.prevWork = c;
+			if (c > st.diag.workWorst) {
+				st.diag.workWorst = c;
+				st.diag.workAt = st.holdT;
+			}
+		}
+		st.raf = requestAnimationFrame(st.tick);
+	}
+
+	// The "draw ahead" half of the hold setting (Settings > Faster loading and smoother holding; the other
+	// half is liteOn). It switches itself off for the note if the editor misbehaves. The editor only draws the part of the note near the
+	// screen, and when the screen gets close to the edge of what it has drawn it draws the next stretch in one go.
+	// With heavy blocks (maths, callouts) that is a freeze of 100 ms or more every ~500 px. Here, shortly before
+	// that would happen, the scroll position is moved just past the drawn edge for an instant and the editor is
+	// told to measure, so it draws the next stretch now, in a frame we choose, and the position is put straight back
+	// (before anything is painted). Whether this makes freezes shorter depends on the editor; the diagnostics
+	// report what it did. Any surprise from the editor switches it off for the rest of the session.
+	drawAhead(st, snapped, dir, ch) {
+		if (st.cmBad || st.boundMode === 'preview') return false;
+		if (st.peekWait > 0) {
+			st.peekWait--;
+			return false;
+		}
+		const sc = st.scroller;
+		try {
+			const cm = st.view && st.view.editor && st.view.editor.cm;
+			if (!cm || typeof cm.measure !== 'function' || !cm.viewport || typeof cm.lineBlockAt !== 'function') {
+				st.cmBad = true;
+				return false;
+			}
+			const pad = cm.documentPadding ? cm.documentPadding.top : 0;
+			const vp = cm.viewport;
+			const blk = cm.lineBlockAt(dir > 0 ? vp.to : vp.from);
+			const edge = (dir > 0 ? blk.bottom : blk.top) + pad;
+			const seen = dir > 0 ? snapped + ch : snapped;
+			const ahead = dir > 0 ? edge - seen : seen - edge;
+			st.peekWait = 5; // looking is cheap, but not every frame
+			if (!(ahead < 700)) return false;
+			const t = performance.now();
+			const from = dir > 0 ? vp.to : vp.from;
+			sc.scrollTop = snapped + dir * Math.max(40, Math.min(420, ahead + 30));
+			const set = sc.scrollTop;
+			cm.measure();
+			st.peekComp = sc.scrollTop - set;
+			const redrew = (dir > 0 ? cm.viewport.to : cm.viewport.from) !== from;
+			if (!redrew) st.peekWait = 30; // the editor had nothing to draw; do not keep asking
+			if (st.diag) {
+				const c = performance.now() - t;
+				st.diag.peeks++;
+				if (redrew) st.diag.redrew++;
+				st.diag.peekMs += c;
+				if (c > st.diag.peekWorst) st.diag.peekWorst = c;
+			}
+			return true;
+		} catch (err) {
+			st.cmBad = true;
+			return true; // the scroll position may have been moved: the caller writes the real one back
+		}
+	}
+
+	// Hands the note from the hold engine to the spring, keeping its speed. The spring lands one full step from
+	// where the press began (a tap), or a short coast further on if the hold was already faster than that.
+	cruiseToSpring(st) {
+		if (!st.cruise) return;
+		const dir = st.hold;
+		const v = st.cv * dir;
+		const w = Math.min(12, Math.max(9, this.glideOmega()));
+		const mx = st.mx || this.readMetrics(st, true);
+		const max = Math.max(0, mx.sh - mx.ch);
+		const goal = Math.min(max, Math.max(0, st.holdGoal));
+		const coast = st.pos + v / w; // exactly the distance an exponential stop from speed v takes
+		const target = dir > 0 ? Math.max(goal, coast) : Math.min(goal, coast);
+		st.target = Math.min(max, Math.max(0, target));
+		st.vel = v;
+		st.omega = w;
+		st.cruise = false;
+		st.cv = 0;
+		st.lastWrite = null; // the spring takes a fresh reading on its first frame
+	}
+
+	// Frame time for the physics, steadied. A screen shows frames at a fixed rate, but the timestamps we are
+	// handed wobble by a millisecond or so; at 1200 px/s that is a pixel of wobble in the note. So a frame
+	// that is (nearly) a whole number of refresh periods long counts as exactly that many. A frame that came
+	// late is capped at a little over one period: moving two frames' worth in one go reads as a leap, while
+	// moving one frame's worth reads as a brief slow-down.
+	frameDt(st, raw) {
+		// The last 15 frame times live in a fixed ring and are sorted in a scratch array with an insertion
+		// sort, so a frame allocates nothing (this runs at the screen's refresh rate, up to 120+ times a second).
+		let ring = st.dtRing;
+		if (!ring) {
+			ring = st.dtRing = new Float64Array(15);
+			st.dtTmp = new Float64Array(15);
+			st.dtN = 0;
+			st.dtI = 0;
+		}
+		if (raw > 0) {
+			ring[st.dtI] = raw;
+			st.dtI = (st.dtI + 1) % 15;
+			if (st.dtN < 15) st.dtN++;
+		}
+		let period = st.period || 1 / 60;
+		let known = false;
+		// The refresh rate you chose (0 = automatic). It is only trusted while the frames really arrive at that
+		// rate, so a wrong choice can never make the scrolling run too fast or too slow.
+		const rate = this.settings.refreshRate;
+		const manual = rate > 0 ? 1 / rate : 0;
+		if (st.dtN >= 6) {
+			const n = st.dtN;
+			const tmp = st.dtTmp;
+			for (let i = 0; i < n; i++) {
+				const v = ring[i];
+				let j = i - 1;
+				while (j >= 0 && tmp[j] > v) {
+					tmp[j + 1] = tmp[j];
+					j--;
+				}
+				tmp[j + 1] = v;
+			}
+			const med = tmp[n >> 1];
+			if (med > 0.003 && med < 0.05) {
+				if (manual && Math.abs(med / manual - 1) < 0.12) {
+					st.period = manual;
+				} else {
+					// A frame time within 5% of a real refresh rate counts as exactly that rate. Once the period is
+					// known it only moves when the screen has really changed rate (adaptive refresh switching between
+					// 60 and 120 Hz), not for every millisecond of wobble in the median.
+					const hz = nearestHz(1 / med);
+					const want = hz ? 1 / hz : med;
+					if (!st.periodKnown) st.period = want;
+					else if (Math.abs(want - st.period) > st.period * 0.04) st.period += (want - st.period) * 0.35;
+				}
+				st.periodKnown = true;
+				period = st.period;
+				known = true;
+			}
+		} else if (st.periodKnown) {
+			// A new press clears the ring, but the screen's refresh period has not changed. Keep using it, so the
+			// first frames are steadied too instead of running on raw timestamps.
+			period = st.period;
+			known = true;
+		} else if (manual && raw > 0 && Math.abs(raw / manual - 1) < 0.3) {
+			// Very first frames of a view: start from the chosen rate rather than from raw timestamps.
+			period = manual;
+			known = true;
+		}
+		st.dtSteady = false;
+		if (!(raw > 0)) return 0.001;
+		if (!known) return Math.min(0.034, Math.max(0.001, raw));
+		const ratio = raw / period;
+		const n = Math.max(1, Math.round(ratio));
+		const snap = Math.abs(ratio - n) < 0.3;
+		let dt = snap ? n * period : raw;
+		dt = Math.min(dt, period * 1.3, 0.05);
+		st.dtSteady = snap;
+		return Math.max(0.001, dt);
+	}
+
+	reportDiag(st) {
+		const d = st.diag;
+		st.diag = null;
+		// A short tap says nothing, but a press that ended any other way than lifting the finger is exactly what to see.
+		if (!d || (d.frames < 12 && (!d.why || d.why === 'pointerup' || d.why === 'restart'))) return;
+		const ms = (n) => (Math.round(n * 10) / 10).toString();
+		const msg =
+			this.repeatLine(d.lateAt, ms) +
+			(this.settings.holdLite ? 'Draw ahead: ' + d.peeks + ' tries, editor drew on ' + d.redrew + ' (worst ' + ms(d.peekWorst) + ' ms)' + (st.cmBad ? ', then switched off' : '') + '\n' : '') +
+			(this._barsProbe ? 'Bars ' + (this._barsProbe.hidden ? 'away' : 'back') + ' (header transform/opacity): ' + (this._barsProbe.s.join(', ') || 'no samples') + '\nHeader classes: ' + (this._barsProbe.cls || '-').slice(0, 80) + (this._barsProbe.style ? ' | inline: ' + this._barsProbe.style.slice(0, 80) : '') + '\n' : '') +
+			this.loadLine() +
+			'Ended by: ' + (d.why || '?') + ' after ' + ms(d.ms / 1000) + ' s' + (d.recaptured ? ' (touch re-grabbed ' + d.recaptured + 'x)' : '') + '\n' +
+			'Hold: ' + d.frames + ' frames, avg ' + ms(d.sum / d.frames) + ' ms, worst ' + ms(d.worst) + ' ms\n' +
+			'Late frames: ' + d.late + ' of ' + d.frames + (d.late ? ' (plugin ' + d.lateOurs + ', note or screen ' + d.lateOther + ')' : '') + '\n' +
+			'Our work: ' + ms(d.work / d.frames) + ' ms per frame, worst ' + ms(d.workWorst) + ' ms at ' + ms(d.workAt) + ' s into the hold (reads ' + ms(d.readWorst) + ' ms at ' + ms(d.readAt) + ' s)\n' +
+			'Nudges from the note: ' + d.nudges + (d.nudges ? ' (avg ' + ms(d.nudgePx / d.nudges) + ' px)' : '') + '\n' +
+			'Frame rate: ' + (st.period ? Math.round(1 / st.period) + ' Hz' : '?') + (this.settings.refreshRate ? ' (set to ' + this.settings.refreshRate + ' Hz)' : ' (automatic)') +
+			', step grid: ' + (st.unit === 1 ? 'whole pixels' : 'device pixels');
+		new Notice(msg, 9000);
+	}
+
+	// Do the late frames come at regular times (something running in the background) or at regular distances
+	// (the editor drawing a new chunk of the note)? The steadier of the two is the likelier culprit.
+	repeatLine(L, ms) {
+		if (!L || L.length < 4) return '';
+		const gt = [];
+		const gp = [];
+		for (let i = 1; i < L.length; i++) {
+			gt.push(L[i][0] - L[i - 1][0]);
+			gp.push(Math.abs(L[i][1] - L[i - 1][1]));
+		}
+		const med = (a) => [...a].sort((x, y) => x - y)[a.length >> 1];
+		const spread = (a) => {
+			const m = med(a);
+			return m ? Math.round((med(a.map((x) => Math.abs(x - m))) / m) * 100) : 100;
+		};
+		return 'Late frames come every ' + ms(med(gt)) + ' s (+-' + spread(gt) + '%) or ' + Math.round(med(gp)) + ' px (+-' + spread(gp) + '%)\n';
+	}
+
 	engineStop(st) {
+		this.liteOff();
 		if (st.raf) cancelAnimationFrame(st.raf);
 		st.raf = 0;
 		st.running = false;
 		st.lastWrite = null;
 		st.vel = 0;
 		st.hold = 0;
+		st.cruise = false;
+		st.cv = 0;
 		st.lead = false;
 		if (st.repeatTimer) clearTimeout(st.repeatTimer);
 		if (st.repeat) clearInterval(st.repeat);
@@ -1107,10 +2084,15 @@ class NoteMinimapPlugin extends Plugin {
 		const sc = st.scroller;
 		if (!sc) return;
 		const step = this.settings.stepSize * dir;
+		st.diag = this.settings.diagnostics
+			? { frames: 0, sum: 0, late: 0, lateOurs: 0, lateOther: 0, prevWork: 0, worst: 0, work: 0, workWorst: 0, nudges: 0, nudgePx: 0, recaptured: 0, why: '', ms: 0, readWorst: 0, readAt: 0, workAt: 0, lateAt: [], peeks: 0, redrew: 0, peekMs: 0, peekWorst: 0 }
+			: null;
+		this._barsProbe = null; // the diagnostics line about the bars is per hold
 		if (st.pressTimer) clearTimeout(st.pressTimer);
 		st.pressTimer = null;
 		st.pressT = performance.now();
 		st.holdOn = false;
+		st.peekWait = 0; // draw ahead may look from the first frame of every hold
 		if (st.el) {
 			st.el.removeClass('nm-press-up', 'nm-press-down', 'nm-holding');
 			st.el.addClass(dir < 0 ? 'nm-press-up' : 'nm-press-down');
@@ -1128,26 +2110,40 @@ class NoteMinimapPlugin extends Plugin {
 		// The press starts moving at once (a small push, then a ramp up to cruise
 		// speed). Releasing early finishes the full step, so a tap always moves
 		// one step and a hold never stalls between the two.
-		const base = st.running ? st.target : sc.scrollTop;
-		st.holdGoal = base + step;
-		this.glide(st, base + step * 0.15, this.glideOmega());
+		this.liteOn();
+		this.prepBars();
+		// Pick up from whatever the note is doing (a glide that is still settling, say) so nothing jerks.
+		const moving = st.running;
+		const base = moving ? st.pos : sc.scrollTop;
+		const v0 = moving ? Math.max(0, st.vel * dir) : 0;
+		const mx = this.readMetrics(st, true);
+		if (!moving) this.engineStart(st);
+		st.pos = base;
+		st.holdGoal = (moving ? st.target : base) + step;
 		st.hold = dir;
 		st.holdT = 0;
+		st.cv0 = v0;
+		st.cv = v0;
+		st.debt = 0;
+		st.vel = 0;
+		st.lastWrite = null;
+		st.target = Math.min(Math.max(0, mx.sh - mx.ch), Math.max(0, base));
+		st.cruise = true;
 	}
 
-	endHold(st) {
+	endHold(st, why) {
+		if (st.diag) {
+			st.diag.why = why || 'restart';
+			st.diag.ms = performance.now() - st.pressT;
+		}
 		if (st.repeatTimer) clearTimeout(st.repeatTimer);
 		if (st.repeat) clearInterval(st.repeat);
 		st.repeatTimer = null;
 		st.repeat = null;
 
-		const sc = st.scroller;
-		if (st.hold && sc) {
-			const max = Math.max(0, sc.scrollHeight - sc.clientHeight);
-			const goal = Math.min(max, Math.max(0, st.holdGoal));
-			st.target = st.hold > 0 ? Math.max(st.target, goal) : Math.min(st.target, goal);
-		}
-		st.hold = 0; // the spring then eases the note to a soft stop
+		if (st.cruise) this.cruiseToSpring(st); // the spring then eases the note to a soft stop
+		st.hold = 0;
+		if (st.diag) this.reportDiag(st);
 		this.releasePress(st);
 	}
 
@@ -1184,7 +2180,10 @@ class NoteMinimapPlugin extends Plugin {
 	bindScroller(view, st) {
 		st.boundMode = view.getMode ? view.getMode() : '';
 		const sc = this.findScroller(view);
-		if (sc === st.scroller) return;
+		if (sc === st.scroller) {
+			if (sc && st.ro && !st.roContent) this.observeContent(st, sc);
+			return;
+		}
 		this.engineStop(st);
 		this.unbind(st);
 		st.scroller = sc;
@@ -1195,14 +2194,19 @@ class NoteMinimapPlugin extends Plugin {
 			sc.style.scrollBehavior = 'auto';
 			if (st.ro) {
 				st.ro.observe(sc);
-				// The note's own height changes as lines are measured or rendered; the scroller's box does not.
-				st.roContent = sc.querySelector('.cm-content, .markdown-preview-sizer');
-				if (st.roContent) st.ro.observe(st.roContent);
+				this.observeContent(st, sc);
 			}
 			sc.addEventListener('scroll', st.onScroll, { passive: true });
 			sc.addEventListener('touchstart', st.onUser, { passive: true });
 			sc.addEventListener('wheel', st.onUser, { passive: true });
 		}
+	}
+
+	// The note's own height changes as lines are measured or rendered; the scroller's box does not, so the
+	// content element is watched too. It may not exist yet when the note is first bound; render() retries.
+	observeContent(st, sc) {
+		st.roContent = sc.querySelector('.cm-content, .markdown-preview-sizer');
+		if (st.roContent) st.ro.observe(st.roContent);
 	}
 
 	// Everything that depends only on settings and device margins. Re-run only when one changes.
@@ -1280,6 +2284,7 @@ class NoteMinimapPlugin extends Plugin {
 			st.vpEl.style.removeProperty('top');
 			st.vpEl.style.removeProperty('height');
 			st.lastVpH = null;
+			st.lastVpTop = null;
 			const w = s.width + '%';
 			st.host.style.setProperty('--nm-width', w);
 			st.el.style.setProperty('--nm-width', w);
@@ -1297,6 +2302,7 @@ class NoteMinimapPlugin extends Plugin {
 			st.text = null;
 			st.stripH = 0;
 			st.lastVpH = null;
+			st.lastVpTop = null;
 			st.linesEl.style.removeProperty('transform');
 			this.clearLines(st);
 		}
@@ -1328,15 +2334,26 @@ class NoteMinimapPlugin extends Plugin {
 		} else if (sb) {
 			if (st.linesEl.firstChild) this.clearLines(st);
 		} else {
-			const text = view.getViewData();
-			if (text !== st.text) {
-				st.text = text;
-				if (wantCanvas) this.buildMap(st, classify(text));
-				else this.buildLines(st, classify(text));
+			// Reading the whole note out of the editor is not free, and a refresh also runs for layout
+			// changes, pane switches and the like, so only do it when the text may have changed.
+			if (st.file !== view.file) {
+				st.file = view.file;
+				st.textDirty = true;
+			}
+			if (st.textDirty || st.text === null) {
+				st.textDirty = false;
+				const text = view.getViewData();
+				if (text !== st.text) {
+					st.text = text;
+					const res = classify(text, MAX_ROWS);
+					if (wantCanvas) this.buildMap(st, res);
+					else this.buildLines(st, res);
+				}
 			}
 		}
 
-		this.bindScroller(view, st);
+		this.ensureScroller(view, st);
+		if (st.scroller && st.ro && !st.roContent) this.observeContent(st, st.scroller);
 		this.updateViewport(st);
 	}
 
@@ -1374,11 +2391,9 @@ class NoteMinimapPlugin extends Plugin {
 	}
 
 	// Keeps the classified lines and works out the strip height; drawMap paints from them.
-	buildMap(st, items) {
-		const step = Math.max(1, Math.ceil(items.length / MAX_ROWS));
-		st.items = items;
-		st.step = step;
-		st.stripH = Math.ceil(items.length / step) * ROW;
+	buildMap(st, res) {
+		st.items = res.items;
+		st.stripH = res.items.length * ROW;
 		st.mapDirty = true;
 	}
 
@@ -1414,14 +2429,12 @@ class NoteMinimapPlugin extends Plugin {
 		const items = st.items;
 		if (!items || !items.length) return;
 
-		const step = st.step;
-		const rowCount = Math.ceil(items.length / step);
 		// Only rows whose 2px bar overlaps the visible strip.
 		const first = Math.max(0, Math.floor((-top - LINE_H) / ROW) + 1);
-		const last = Math.min(rowCount - 1, Math.ceil((mapH - top) / ROW) - 1);
+		const last = Math.min(items.length - 1, Math.ceil((mapH - top) / ROW) - 1);
 		let curCls = null;
 		for (let r = first; r <= last; r++) {
-			const it = items[r * step];
+			const it = items[r];
 			if (!it || it.cls === 'nm-blank') continue;
 			if (it.cls !== curCls) {
 				curCls = it.cls;
@@ -1438,14 +2451,14 @@ class NoteMinimapPlugin extends Plugin {
 
 	// Rows are kept between edits and only the ones whose look changed are touched, so typing in a
 	// long note updates a handful of nodes instead of tearing down and recreating thousands.
-	buildLines(st, items) {
-		const step = Math.max(1, Math.ceil(items.length / MAX_ROWS));
+	buildLines(st, res) {
+		const items = res.items;
 		const rows = st.rows;
 		const frag = document.createDocumentFragment();
 		let row = 0;
 
-		for (let i = 0; i < items.length; i += step, row++) {
-			const it = items[i];
+		for (; row < items.length; row++) {
+			const it = items[row];
 			const cur = rows[row];
 			if (it.cls === 'nm-blank') {
 				if (cur) {
@@ -1468,7 +2481,7 @@ class NoteMinimapPlugin extends Plugin {
 			const d = document.createElement('div');
 			d.className = 'note-minimap-line ' + it.cls;
 			d.style.cssText =
-				'--nm-line-top:' + row * (LINE_H + GAP) + 'px;--nm-line-width:' + pct + '%' + (left ? ';left:' + left + 'px' : '');
+				'--nm-line-top:' + row * ROW + 'px;--nm-line-width:' + pct + '%' + (left ? ';left:' + left + 'px' : '');
 			frag.appendChild(d);
 			rows[row] = { el: d, sig };
 		}
@@ -1478,7 +2491,7 @@ class NoteMinimapPlugin extends Plugin {
 		rows.length = row;
 
 		st.linesEl.appendChild(frag);
-		st.stripH = Math.ceil(items.length / step) * (LINE_H + GAP);
+		st.stripH = items.length * ROW;
 		st.linesEl.style.setProperty('--nm-strip-height', st.stripH + 'px');
 		// Every bar has the same height, so it is set once on the container and inherited.
 		st.linesEl.style.setProperty('--nm-line-height', LINE_H + 'px');
@@ -1487,12 +2500,26 @@ class NoteMinimapPlugin extends Plugin {
 	// Native scrolling (finger on the note, wheel, keyboard) can fire faster than the screen
 	// refreshes. Redraw the thumb once per frame; the engine already redraws every frame itself.
 	queueViewport(st) {
-		if (st.vpQueued || st.running) return;
+		if (st.vpQueued || st.running || this.settings.hideScrollbar) return;
 		st.vpQueued = true;
 		requestAnimationFrame(() => {
 			st.vpQueued = false;
 			if (!st.dead && !st.running) this.updateViewport(st);
 		});
+	}
+
+	// Writes the thumb's size and position, skipping whatever has not changed since the last write.
+	placeThumb(st, vpTop, vpH) {
+		const v = st.vpEl.style;
+		if (st.lastVpH !== vpH) {
+			st.lastVpH = vpH;
+			v.top = '0px';
+			v.height = vpH + 'px';
+		}
+		if (st.lastVpTop !== vpTop) {
+			st.lastVpTop = vpTop;
+			v.transform = 'translate3d(0,' + vpTop + 'px,0)';
+		}
 	}
 
 	updateViewport(st, livePos) {
@@ -1503,6 +2530,9 @@ class NoteMinimapPlugin extends Plugin {
 			st.vpEl.style.display = 'none';
 			return;
 		}
+		// A hidden strip is display:none; showing it again re-styles and redraws it (the style key
+		// includes hideScrollbar), so there is nothing to keep up to date meanwhile.
+		if (s.hideScrollbar) return;
 
 		const live = livePos !== undefined;
 		const mx = live ? this.readMetrics(st) : null;
@@ -1517,16 +2547,35 @@ class NoteMinimapPlugin extends Plugin {
 		const sh = live ? mx.sh : Math.max(1, sc.scrollHeight);
 		const ch = live ? mx.ch : sc.clientHeight;
 		const maxScroll = Math.max(1, sh - ch);
+		// The editor only knows the real height of lines it has drawn, so while a long note scrolls its total
+		// height is corrected again and again. Read straight, that makes the thumb's size and position twitch.
+		// While the engine runs, the height the thumb uses eases toward the real one over a few frames instead
+		// (about a tenth of a second); the note itself always uses the real numbers.
+		let shV = sh;
+		if (sb) {
+			if (live && st.shView) {
+				// 0.2 per frame at 60 Hz is a time constant of about 75 ms; keep that at any refresh rate.
+				const k = 1 - Math.exp(-Math.min(0.05, st.dtLast || 1 / 60) / 0.075);
+				shV = st.shView + (sh - st.shView) * k;
+				if (Math.abs(sh - shV) < 0.5) shV = sh;
+			}
+			st.shView = shV;
+		}
+		const maxView = Math.max(1, shV - ch);
 		// While you drag the thumb it stays glued to your finger; the note catches up.
 		const shown = sb && st.lead ? st.target : live ? livePos : sc.scrollTop;
-		const frac = Math.min(1, Math.max(0, shown / maxScroll));
+		const frac = Math.min(1, Math.max(0, shown / maxView));
 		const e = st.el.style;
 
 		if (sb) {
 			// Same maths as a native scrollbar thumb.
 			const a = s.showArrows && s.touchEnabled ? s.arrowSize : 0;
 			const trackH = Math.max(1, mapH - 2 * a);
-			const vpH = Math.min(trackH, Math.max(44, (ch / sh) * trackH));
+			let vpH = Math.min(trackH, Math.max(44, (ch / shV) * trackH));
+			// Resizing the thumb means laying it out and redrawing it. While a long note scrolls, its height
+			// estimate creeps by fractions of a pixel on almost every frame; only follow changes you could see.
+			if (st.vpHq !== undefined && Math.abs(vpH - st.vpHq) < 1 / (window.devicePixelRatio || 1)) vpH = st.vpHq;
+			else st.vpHq = vpH;
 			const vpTop = a + frac * (trackH - vpH);
 			st.arrow = a;
 			st.trackH = trackH;
@@ -1534,7 +2583,7 @@ class NoteMinimapPlugin extends Plugin {
 			st.vpH = vpH;
 			st.vpTop = vpTop;
 			const atTop = shown <= 1;
-			const atBottom = shown >= maxScroll - 1;
+			const atBottom = shown >= maxScroll - 1; // real height: this is about the note, not the thumb
 			if (atTop !== st.atTop) {
 				st.atTop = atTop;
 				st.el.toggleClass('nm-at-top', atTop);
@@ -1549,13 +2598,7 @@ class NoteMinimapPlugin extends Plugin {
 				st.el.toggleClass('nm-no-scroll', noScroll);
 			}
 			// Move the thumb with a GPU transform; it stays perfectly in step with the note.
-			const v = st.vpEl.style;
-			if (st.lastVpH !== vpH) {
-				st.lastVpH = vpH;
-				v.top = '0px';
-				v.height = vpH + 'px';
-			}
-			v.transform = 'translate3d(0,' + vpTop + 'px,0)';
+			this.placeThumb(st, vpTop, vpH);
 			return;
 		}
 
@@ -1570,18 +2613,173 @@ class NoteMinimapPlugin extends Plugin {
 		// them each frame would restyle all of them. Transforms on the two moving parts do not.
 		if (st.canvas) this.drawMap(st, mapH);
 		else st.linesEl.style.transform = 'translate3d(0,' + st.stripTop + 'px,0)';
-		const v = st.vpEl.style;
-		if (st.lastVpH !== vpH) {
-			st.lastVpH = vpH;
-			v.top = '0px';
-			v.height = vpH + 'px';
-		}
-		v.transform = 'translate3d(0,' + vpTop + 'px,0)';
+		this.placeThumb(st, vpTop, vpH);
 		// The dimming overlays only exist while the strip is being dragged.
 		if (st.dragging) {
 			e.setProperty('--nm-fade-top', vpTop + 'px');
 			e.setProperty('--nm-fade-bot', vpTop + vpH + 'px');
 		}
+	}
+}
+
+class RefreshRateModal extends Modal {
+	constructor(app, plugin, onDone) {
+		super(app);
+		this.plugin = plugin;
+		this.onDone = onDone;
+		this.stop = null;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		const p = this.plugin;
+		contentEl.empty();
+		contentEl.addClass('nm-hz-modal');
+		// Our own entrance and exit for the whole pop-up (see styles.css); the built-in one is switched off for it.
+		this.closing = false;
+		if (this.containerEl) this.containerEl.addClass('nm-hz-container');
+		if (this.modalEl) this.modalEl.addClass('nm-hz-box');
+		contentEl.createEl('h3', { text: 'What is your screen refresh rate?' });
+		contentEl.createEl('p', {
+			text: 'Arrow scrolling is timed to your screen so every redraw moves the note by the same, whole number of pixels. Most phones are 60 Hz; many newer ones are 90 or 120 Hz. Pick yours, or let the plugin measure it.',
+		});
+		this.status = contentEl.createDiv({ cls: 'nm-hz-status' });
+		this.showCurrent();
+		this.pad = contentEl.createDiv({ cls: 'nm-hz-pad' });
+		this.pad.createDiv({ cls: 'nm-hz-hint', text: 'Measure: tap the button, then keep a finger moving on this box' });
+		this.dot = this.pad.createDiv({ cls: 'nm-hz-dot' });
+		this.result = this.pad.createDiv({ cls: 'nm-hz-result' });
+		this.progress = this.pad.createDiv({ cls: 'nm-hz-progress' });
+
+		const row = contentEl.createDiv({ cls: 'nm-hz-row' });
+		const measure = row.createEl('button', { text: 'Measure', cls: 'mod-cta' });
+		measure.addEventListener('click', () => this.measure(measure));
+		this.choices = new Map(); // refresh rate -> its button, so the current one can be marked
+		for (const hz of [60, 90, 120, 144]) {
+			const b = row.createEl('button', { text: hz + ' Hz' });
+			b.addEventListener('click', () => this.choose(hz));
+			this.choices.set(hz, b);
+		}
+		const auto = row.createEl('button', { text: 'Automatic' });
+		auto.addEventListener('click', () => this.choose(0));
+		this.choices.set(0, auto);
+		this.showCurrent();
+		contentEl.createEl('p', {
+			cls: 'nm-hz-note',
+			text: 'Not sure? Leave it on Automatic. You can change this any time under Settings → My Note Minimap → Screen refresh rate.',
+		});
+	}
+
+	// Plays the exit animation, then really closes.
+	close() {
+		const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+		if (this.closing || reduced || !this.containerEl || !this.containerEl.isConnected) {
+			super.close();
+			return;
+		}
+		this.closing = true;
+		this.containerEl.addClass('nm-hz-closing');
+		window.setTimeout(() => super.close(), 190);
+	}
+
+	showCurrent() {
+		const r = this.plugin.settings.refreshRate;
+		this.status.setText('Current: ' + (r ? r + ' Hz' : 'automatic'));
+		if (this.choices) for (const [hz, b] of this.choices) b.toggleClass('nm-hz-current', hz === (r || 0));
+	}
+
+	async choose(hz) {
+		this.plugin.settings.refreshRate = hz;
+		this.plugin.settings.refreshAsked = true;
+		await this.plugin.saveSettings();
+		this.close();
+	}
+
+	// Counts how long frames really take while a finger is on the pad. Phones with adaptive refresh drop to a
+	// lower rate when nothing is touching the screen, so the frames only count while the finger is down.
+	measure(btn) {
+		if (this.stop) return;
+		const pad = this.pad;
+		const dot = this.dot;
+		const gaps = [];
+		let touching = false;
+		let last = 0;
+		let raf = 0;
+		const t0 = performance.now();
+		// Read once: asking for the width on every frame forced a re-layout each time and made the dot stutter.
+		const travel = Math.max(0, pad.clientWidth - 24);
+		const progress = this.progress;
+		progress.style.transform = 'scaleX(0)';
+		pad.removeClass('nm-hz-done');
+		const down = () => {
+			touching = true;
+			last = 0;
+		};
+		const up = () => {
+			touching = false;
+			last = 0;
+		};
+		pad.addEventListener('pointerdown', down);
+		pad.addEventListener('pointerup', up);
+		pad.addEventListener('pointercancel', up);
+		pad.addEventListener('pointerleave', up);
+		pad.addClass('nm-hz-live');
+		btn.disabled = true;
+		this.status.setText('Measuring: keep your finger moving on the box…');
+
+		const end = (done) => {
+			cancelAnimationFrame(raf);
+			pad.removeEventListener('pointerdown', down);
+			pad.removeEventListener('pointerup', up);
+			pad.removeEventListener('pointercancel', up);
+			pad.removeEventListener('pointerleave', up);
+			pad.removeClass('nm-hz-live');
+			btn.disabled = false;
+			this.stop = null;
+			if (!done) {
+				this.showCurrent();
+				return;
+			}
+			const g = gaps.slice(4).sort((a, b) => a - b);
+			if (g.length < 20) {
+				this.status.setText('Not enough frames. Tap Measure again and keep a finger moving on the box.');
+				return;
+			}
+			const med = g[g.length >> 1];
+			const hz = nearestHz(1000 / med) || Math.round(1000 / med);
+			this.plugin.settings.refreshRate = hz;
+			this.plugin.settings.refreshAsked = true;
+			this.plugin.saveSettings();
+			this.status.setText('Measured ' + hz + ' Hz and saved it.');
+			this.result.setText(hz + ' Hz');
+			pad.addClass('nm-hz-done');
+			if (this.choices) for (const [k, b] of this.choices) b.toggleClass('nm-hz-current', k === hz);
+		};
+		this.stop = () => end(false);
+
+		const frame = (t) => {
+			// Something has to change on every frame, or the screen has no reason to redraw at full rate.
+			dot.style.transform = 'translate3d(' + (Math.sin(t / 170) * 0.5 + 0.5) * travel + 'px,0,0)';
+			if (touching) {
+				if (last) gaps.push(t - last);
+				last = t;
+				progress.style.transform = 'scaleX(' + Math.min(1, gaps.length / 70) + ')';
+			}
+			if (gaps.length >= 70) return end(true);
+			if (performance.now() - t0 > 15000) return end(true);
+			raf = requestAnimationFrame(frame);
+		};
+		raf = requestAnimationFrame(frame);
+	}
+
+	async onClose() {
+		if (this.stop) this.stop();
+		this.contentEl.empty();
+		if (!this.plugin.settings.refreshAsked) {
+			this.plugin.settings.refreshAsked = true;
+			await this.plugin.saveSettings();
+		}
+		if (this.onDone) this.onDone();
 	}
 }
 
@@ -1598,7 +2796,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Touch controls')
-			.setDesc('When off, the strip ignores your finger: it only shows where you are, and touches reach the note underneath. This is the same switch as the header button.')
+			.setDesc('Turn off to let touches pass through to the note. The bar then only shows where you are.')
 			.addToggle((t) =>
 				t.setValue(p.settings.touchEnabled).onChange(async (v) => {
 					p.settings.touchEnabled = v;
@@ -1608,7 +2806,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Hide scrollbar')
-			.setDesc('Hide the whole scrollbar or minimap and give the note its full width. Same as long-pressing the header button.')
+			.setDesc('Hide the bar and give the note the full width.')
 			.addToggle((t) =>
 				t.setValue(p.settings.hideScrollbar).onChange(async (v) => {
 					p.settings.hideScrollbar = v;
@@ -1618,7 +2816,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Header button')
-			.setDesc('Show a hand button in the note header (next to the Reading view icon) to turn the touch area on and off. Long-press it to hide or show the whole scrollbar. If the header is full, it may appear inside the three-dot menu instead.')
+			.setDesc('Add a hand button to the note header. Tap it to turn touch on or off. Long-press it to hide or show the bar.')
 			.addToggle((t) =>
 				t.setValue(p.settings.touchButton).onChange(async (v) => {
 					p.settings.touchButton = v;
@@ -1628,7 +2826,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Fast rendering')
-			.setDesc('Makes the minimap style much lighter on long notes: it is painted on a single canvas instead of thousands of elements, waits a little longer after you stop typing before it refreshes, and skips notes in background tabs until you switch to them. Nothing about how the note or the scrollbar looks changes. The scrollbar style is already light, so this has no effect on it.')
+			.setDesc('Makes the minimap run faster on long notes. It looks the same.')
 			.addToggle((t) =>
 				t.setValue(p.settings.fastRender).onChange(async (v) => {
 					p.settings.fastRender = v;
@@ -1638,7 +2836,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Style')
-			.setDesc('Scrollbar: a thin draggable bar that looks like the normal scrollbar. Minimap: the colour-coded overview (very demanding, so it may lag on long notes).')
+			.setDesc('Scrollbar is a thin bar you drag. Minimap is a small preview of your note (can be slow on long notes).')
 			.addDropdown((d) =>
 				d
 					.addOption('scrollbar', 'Scrollbar')
@@ -1653,7 +2851,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Side')
-			.setDesc('Which edge of the note the minimap sits on.')
+			.setDesc('Which side of the screen the bar is on.')
 			.addDropdown((d) =>
 				d
 					.addOption('right', 'Right')
@@ -1672,19 +2870,20 @@ class MinimapSettingTab extends PluginSettingTab {
 				.setDesc(desc)
 				.addSlider((sl) => {
 					comps[key] = sl;
+					const apply = async (v) => {
+						p.settings[key] = v;
+						if (adjust) adjust(v);
+						await p.saveSettings();
+					};
 					sl
 						.setLimits(min, max, step)
 						.setValue(typeof p.settings[key] === 'number' ? p.settings[key] : key === 'thumbWidth' ? p.barWidth() : p.inset(key))
-						.setDynamicTooltip()
-						.onChange(async (v) => {
-							p.settings[key] = v;
-							if (adjust) adjust(v);
-							await p.saveSettings();
-						});
-				}), [key]);
+						.onChange(apply);
+					this.addFineControls(sl, min, max, step, apply);
+				}), [key], comps);
 
 		if (p.settings.style === 'scrollbar') {
-			slider('Bar width', 'Width of the visible scrollbar, in pixels. Starts at 14 and adjusts slightly to the screen of each device until you move this slider. The touch area below grows with it if it would otherwise be too narrow.', 'thumbWidth', 6, 40, 1, () => {
+			slider('Bar width', 'How wide the bar is, in pixels.', 'thumbWidth', 6, 40, 1, () => {
 				const need = p.barWidth() + 6;
 				if (p.settings.hitWidth < need) {
 					p.settings.hitWidth = need;
@@ -1693,7 +2892,7 @@ class MinimapSettingTab extends PluginSettingTab {
 			});
 			new Setting(containerEl)
 				.setName('Shape')
-				.setDesc('Corner style of the scrollbar thumb.')
+				.setDesc('How round the bar corners are.')
 				.addDropdown((d) =>
 					d
 						.addOption('pill', 'Pill (fully round)')
@@ -1708,16 +2907,16 @@ class MinimapSettingTab extends PluginSettingTab {
 
 			this.addColorSetting(containerEl, {
 				name: 'Colour',
-				desc: 'Thumb colour. Type a hex code (like #d19a66) or use the picker. Empty follows your theme accent.',
+				desc: 'Auto matches your theme. Custom lets you pick any colour.',
 				key: 'thumbColor',
 				fallback: '#d19a66',
 			});
 
-			slider('Opacity', 'How solid the thumb looks.', 'thumbOpacity', 0.2, 1, 0.05);
+			slider('Opacity', 'How solid the bar looks.', 'thumbOpacity', 0.2, 1, 0.05);
 
 			new Setting(containerEl)
 				.setName('Show track')
-				.setDesc('A faint groove behind the thumb so you can see where the bar runs.')
+				.setDesc('Show a faint line behind the bar.')
 				.addToggle((t) =>
 					t.setValue(p.settings.showTrack).onChange(async (v) => {
 						p.settings.showTrack = v;
@@ -1727,7 +2926,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 			new Setting(containerEl)
 				.setName('Glow')
-				.setDesc('A soft glow around the thumb.')
+				.setDesc('Add a soft glow around the bar.')
 				.addToggle((t) =>
 					t.setValue(p.settings.glow).onChange(async (v) => {
 						p.settings.glow = v;
@@ -1739,12 +2938,12 @@ class MinimapSettingTab extends PluginSettingTab {
 			if (p.settings.glow) {
 				this.addColorSetting(containerEl, {
 					name: 'Glow colour',
-					desc: 'Hex code for the glow. Empty uses the thumb colour.',
+					desc: 'Auto matches the bar. Custom lets you pick a colour.',
 					key: 'glowColor',
 					fallback: '#d19a66',
 				});
-				slider('Glow size', 'How far the glow spreads out (blur), in pixels.', 'glowBlur', 0, 40, 1);
-				slider('Glow strength', 'How thick the glow is next to the thumb, in pixels.', 'glowSpread', 0, 10, 1);
+				slider('Glow size', 'How far the glow spreads, in pixels.', 'glowBlur', 0, 40, 1);
+				slider('Glow strength', 'How thick the glow is, in pixels.', 'glowSpread', 0, 10, 1);
 				slider('Glow opacity', 'How bright the glow is.', 'glowOpacity', 0.1, 1, 0.05);
 			}
 
@@ -1753,9 +2952,9 @@ class MinimapSettingTab extends PluginSettingTab {
 			new Setting(containerEl)
 				.setName('Margins for this device')
 				.setDesc(
-					(auto ? 'Automatic: ' : 'Custom values. This device would use ') +
-						'top ' + dev.insetTop + ', bottom ' + dev.insetBottom + ', edge ' + dev.insetEdge +
-						' px. Moving a margin slider below makes it custom.'
+					(auto ? 'Automatic: ' : 'Custom. Device default: ') +
+						'top ' + dev.insetTop + ', bottom ' + dev.insetBottom + ', side ' + dev.insetEdge +
+						' px.' + (auto ? ' Move a slider below to set your own.' : '')
 				)
 				.addButton((b) =>
 					b
@@ -1770,10 +2969,10 @@ class MinimapSettingTab extends PluginSettingTab {
 						})
 				);
 
-			slider('Top margin', 'Shortens the scrollbar from the top, so a camera cut-out or rounded corner does not cover the arrow.', 'insetTop', 0, 240, 2);
-			slider('Bottom margin', 'Shortens the scrollbar from the bottom, so the gesture bar or a rounded corner does not cover the arrow.', 'insetBottom', 0, 240, 2);
-			slider('Edge margin', 'Moves the scrollbar in from the side of the screen, away from curved edges, in pixels.', 'insetEdge', 0, 60, 1);
-			slider('Touch area', 'Width of the scrollbar column that grabs your finger, in pixels. The bar sits inside it and the note is kept clear of it, so nothing overlaps. It is never narrower than the bar.', 'hitWidth', 20, 140, 2, (v) => {
+			slider('Top margin', 'Space above the bar, so the screen corner does not cover it.', 'insetTop', 0, 240, 2);
+			slider('Bottom margin', 'Space below the bar, so the gesture bar does not cover it.', 'insetBottom', 0, 240, 2);
+			slider('Edge margin', 'Space between the bar and the screen edge, in pixels.', 'insetEdge', 0, 60, 1);
+			slider('Touch area', 'How wide the area is that reacts to your finger, in pixels.', 'hitWidth', 20, 140, 2, (v) => {
 				const need = p.barWidth() + 6;
 				if (v < need) {
 					p.settings.hitWidth = need;
@@ -1783,7 +2982,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 			new Setting(containerEl)
 				.setName('Arrow buttons')
-				.setDesc('Add up and down arrows at the ends of the scrollbar. Tap an arrow to step one page-chunk, hold it to keep scrolling (it speeds up the longer you hold). While pressed, the arrow glides into a pill highlight and returns when released.')
+				.setDesc('Add up and down arrows. Tap to scroll a little, hold to keep scrolling.')
 				.addToggle((t) =>
 					t.setValue(p.settings.showArrows).onChange(async (v) => {
 						p.settings.showArrows = v;
@@ -1793,19 +2992,19 @@ class MinimapSettingTab extends PluginSettingTab {
 				);
 
 			if (p.settings.showArrows) {
-				slider('Arrow size', 'Height of each arrow button and its touch zone, in pixels.', 'arrowSize', 14, 80, 1);
-				slider('Step per tap', 'How far one arrow tap scrolls, in pixels.', 'stepSize', 40, 600, 10);
-				slider('Hold speed', 'How fast the note scrolls while you hold an arrow, in pixels per second.', 'holdSpeed', 300, 4000, 100);
+				slider('Arrow size', 'How big each arrow button is, in pixels.', 'arrowSize', 14, 80, 1);
+				slider('Step per tap', 'How far one tap scrolls, in pixels.', 'stepSize', 40, 600, 10);
+				slider('Hold speed', 'How fast the note scrolls while you hold an arrow. Higher is faster.', 'holdSpeed', 100, 4000, 20);
 			}
 		} else {
-			slider('Width', 'Minimap width, as a % of the note width.', 'width', 3, 30, 1);
-			slider('Top offset', 'Distance from the top of the note, in %.', 'top', 0, 50, 1);
-			slider('Height', 'Minimap height, as a % of the note height.', 'height', 20, 100, 5);
+			slider('Width', 'How wide the minimap is, as a % of the note.', 'width', 3, 30, 1);
+			slider('Top offset', 'How far down from the top it starts, in %.', 'top', 0, 50, 1);
+			slider('Height', 'How tall the minimap is, as a % of the note.', 'height', 20, 100, 5);
 		}
 
 		new Setting(containerEl)
 			.setName('Smooth scrolling')
-			.setDesc('Glide when you tap the track, tap an arrow or use the wheel, and soften dragging.')
+			.setDesc('Scroll with a soft glide instead of jumping.')
 			.addToggle((t) =>
 				t.setValue(p.settings.smooth).onChange(async (v) => {
 					p.settings.smooth = v;
@@ -1814,19 +3013,64 @@ class MinimapSettingTab extends PluginSettingTab {
 				})
 			);
 
+		{
+			const cur = p.settings.refreshRate || 0;
+			const rates = [60, 90, 120, 144];
+			if (cur && !rates.includes(cur)) rates.push(cur);
+			rates.sort((a, b) => a - b);
+			new Setting(containerEl)
+				.setName('Screen refresh rate')
+				.setDesc('Helps arrow scrolling stay smooth. Leave on Automatic unless it looks jumpy.')
+				.addDropdown((d) => {
+					d.addOption('0', 'Automatic');
+					for (const r of rates) d.addOption(String(r), r + ' Hz');
+					d.setValue(String(cur)).onChange(async (v) => {
+						p.settings.refreshRate = Number(v) || 0;
+						p.settings.refreshAsked = true;
+						await p.saveSettings();
+					});
+				})
+				.addButton((b) =>
+					b.setButtonText('Measure').onClick(() => {
+						new RefreshRateModal(this.app, p, () => this.display()).open();
+					})
+				);
+		}
+
 		new Setting(containerEl)
-			.setName('Animate top and bottom bars')
-			.setDesc('When the strip scrolls the note, slide the header and bottom bar away going down and glide them back going up, instead of popping.')
+			.setName('Faster loading and smoother holding')
+			.setDesc('Opens notes faster and makes holding an arrow smoother on long or heavy notes.')
 			.addToggle((t) =>
-				t.setValue(p.settings.animateBars).onChange(async (v) => {
-					p.settings.animateBars = v;
-					if (!v) p.releaseBars();
+				t.setValue(p.settings.holdLite).onChange(async (v) => {
+					p.settings.holdLite = v;
+					if (!v) {
+						p.liteOff();
+						p.uninstallLoadBoost();
+					} else {
+						p._boostBad = false;
+						p.installLoadBoost();
+						p.warmSoon();
+					}
+					for (const st of p.states.values()) {
+						st.cmBad = false;
+						st.peekWait = 0;
+					}
+					await p.saveSettings();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName('Scroll diagnostics')
+			.setDesc('After holding an arrow, show a short report on how smooth it was. Only for troubleshooting.')
+			.addToggle((t) =>
+				t.setValue(p.settings.diagnostics).onChange(async (v) => {
+					p.settings.diagnostics = v;
 					await p.saveSettings();
 				})
 			);
 
 		if (p.settings.smooth) {
-			slider('Glide length', 'How long a glide lasts, in milliseconds. Longer feels softer.', 'smoothMs', 80, 800, 20);
+			slider('Glide length', 'How long the glide lasts, in milliseconds. Longer is softer.', 'smoothMs', 80, 800, 20);
 		}
 
 		new Setting(containerEl)
@@ -1842,34 +3086,292 @@ class MinimapSettingTab extends PluginSettingTab {
 		this.renderExclusions(containerEl);
 	}
 
-	// Adds a reset button that puts the given settings back to their defaults.
-	withReset(setting, keys) {
+	// Fine control for a slider: a minus and a plus button that move it exactly one step (hold to repeat), and a
+	// number that always shows the current value, so you no longer have to land a finger on the exact notch.
+	addFineControls(sl, min, max, step, apply) {
+		const ctl = sl.sliderEl.parentElement;
+		if (!ctl) return;
+		const dec = step < 1 ? (String(step).split('.')[1] || '').length : 0;
+		const fmt = (v) => (dec ? Number(v).toFixed(dec) : String(Math.round(Number(v))));
+
+		const readout = createEl('span', { cls: 'nm-slider-value' });
+		const bubbleHooks = { show: () => {}, hide: () => {}, bubble: null };
+		// The filled part of the pill track follows the value (CSS reads --nm-frac, 0 to 1).
+		const show = () => {
+			readout.setText(fmt(sl.getValue()));
+			if (bubbleHooks.bubble) bubbleHooks.bubble.setText(fmt(sl.getValue()));
+			(sl.sliderEl.parentElement || sl.sliderEl).style.setProperty('--nm-frac', String(Math.min(1, Math.max(0, (Number(sl.getValue()) - min) / (max - min || 1)))));
+		};
+
+		// The thumb glides to its new place instead of jumping. A range input only sits on whole steps, so while it
+		// glides the step is lifted (step="any"), then put back and the value snapped to the exact target. The setting
+		// itself changes at once; only the picture eases. Pressing again mid-glide carries on from where the thumb is.
+		const input = sl.sliderEl;
+		const GLIDE_MS = 170;
+		let raf = 0;
+		let tgt = null; // where the glide is heading
+		const reduced = () => !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+
+		const endGlide = () => {
+			if (raf) cancelAnimationFrame(raf);
+			raf = 0;
+			tgt = null;
+			input.step = String(step);
+			input.removeClass('nm-slider-gliding');
+		};
+
+		const glideTo = (to) => {
+			if (raf) cancelAnimationFrame(raf);
+			raf = 0;
+			const from = Number(input.value);
+			if (reduced() || from === to) {
+				endGlide();
+				sl.setValue(to);
+				return;
+			}
+			tgt = to;
+			input.step = 'any';
+			input.addClass('nm-slider-gliding');
+			const t0 = performance.now();
+			const frame = (now) => {
+				const t = Math.min(1, (now - t0) / GLIDE_MS);
+				if (t < 1) {
+					sl.setValue(from + (to - from) * (1 - Math.pow(1 - t, 3)));
+					raf = requestAnimationFrame(frame);
+				} else {
+					endGlide();
+					sl.setValue(to);
+				}
+			};
+			raf = requestAnimationFrame(frame);
+		};
+
+		// A finger on the slider itself takes over from any glide.
+		input.addEventListener('pointerdown', endGlide);
+
+		const pop = () => {
+			readout.removeClass('nm-pop');
+			void readout.offsetWidth; // restart the animation if it is still playing
+			readout.addClass('nm-pop');
+		};
+
+		const stepBy = (dir) => {
+			const cur = tgt !== null ? tgt : Number(sl.getValue());
+			let nv = Math.round((cur - min) / step) * step + min + dir * step;
+			nv = Math.min(max, Math.max(min, Number(nv.toFixed(dec))));
+			if (nv === cur) return;
+			glideTo(nv);
+			apply(nv);
+		};
+
+		const makeBtn = (label, dir, aria) => {
+			const btn = createEl('button', { cls: ['nm-step-btn', dir < 0 ? 'nm-step-minus' : 'nm-step-plus'], attr: { 'aria-label': aria, type: 'button' } });
+			let delay = null;
+			let rep = null;
+			const stop = () => {
+				if (delay) window.clearTimeout(delay);
+				if (rep) window.clearInterval(rep);
+				delay = rep = null;
+			};
+			btn.addEventListener('pointerdown', (e) => {
+				e.preventDefault();
+				stop();
+				bubbleHooks.show();
+				stepBy(dir);
+				// Holding repeats, after a short pause so a single tap is always exactly one step.
+				delay = window.setTimeout(() => {
+					delay = null;
+					rep = window.setInterval(() => stepBy(dir), 90);
+				}, 400);
+			});
+			for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) btn.addEventListener(ev, () => { stop(); bubbleHooks.hide(450); });
+			btn.addEventListener('contextmenu', (e) => e.preventDefault());
+			return btn;
+		};
+
+		// One row of its own holds [minus] [slider] [plus] [number]. Obsidian's phone layout stretches loose buttons and
+		// wraps controls, which pushed the slider off the screen; inside this row nothing can grow past the width.
+		const row = createDiv({ cls: 'nm-slider-row' });
+		ctl.insertBefore(row, sl.sliderEl);
+		row.appendChild(makeBtn('\u2212', -1, 'Decrease by one step'));
+		// The groove is drawn by two plain elements behind the input, so the thumb sits dead centre on it.
+		const wrap = createDiv({ cls: 'nm-slider-wrap' });
+		const groove = wrap.createDiv({ cls: 'nm-slider-groove' });
+		groove.createDiv({ cls: 'nm-slider-fill' });
+		wrap.appendChild(sl.sliderEl);
+		wrap.createDiv({ cls: 'nm-slider-thumb' });
+		// The pop-up that grows out of the pill while the slider is in use and shows the number.
+		const bubble = wrap.createDiv({ cls: 'nm-slider-bubble' });
+		let hideT = 0;
+		const showBubble = () => {
+			window.clearTimeout(hideT);
+			row.addClass('nm-active');
+		};
+		const hideBubble = (delay) => {
+			window.clearTimeout(hideT);
+			hideT = window.setTimeout(() => row.removeClass('nm-active'), delay);
+		};
+		sl.sliderEl.addEventListener('pointerdown', showBubble);
+		for (const ev of ['pointerup', 'pointercancel', 'lostpointercapture', 'change']) sl.sliderEl.addEventListener(ev, () => hideBubble(150));
+		bubbleHooks.show = showBubble;
+		bubbleHooks.hide = hideBubble;
+		bubbleHooks.bubble = bubble;
+		row.appendChild(wrap);
+		row.appendChild(makeBtn('+', 1, 'Increase by one step'));
+		row.appendChild(readout);
+		// Anything else Obsidian put next to the slider (its own value label) would repeat our number: hide it.
+		for (const k of Array.from(ctl.children)) if (k !== row) k.style.display = 'none';
+		const item = ctl.closest('.setting-item');
+		if (item) item.addClass('nm-slider-setting');
+
+		// Keep the number right when the slider is dragged, or set from code (the reset button glides it).
+		sl.sliderEl.addEventListener('input', show);
+		const setValue = sl.setValue.bind(sl);
+		sl.setValue = (v) => {
+			const r = setValue(v);
+			show();
+			return r;
+		};
+		show();
+	}
+
+	// Adds a reset button that puts the given settings back to their defaults. The icon spins and the
+	// slider glides to its default value instead of jumping.
+	withReset(setting, keys, comps) {
 		const p = this.plugin;
 		setting.addExtraButton((b) =>
 			b
 				.setIcon('rotate-ccw')
 				.setTooltip('Reset to default')
 				.onClick(async () => {
-					for (const k of keys) p.settings[k] = DEFAULTS[k];
+					const btn = b.extraSettingsEl;
+					btn.removeClass('nm-reset-spin');
+					void btn.offsetWidth; // restart the animation if clicked again
+					btn.addClass('nm-reset-spin');
+					window.setTimeout(() => btn.removeClass('nm-reset-spin'), 600);
+
+					for (const k of keys) {
+						const sl = comps && comps[k];
+						p.settings[k] = DEFAULTS[k];
+						if (!sl || !sl.sliderEl) continue;
+						const from = Number(sl.getValue());
+						const to = typeof DEFAULTS[k] === 'number' ? DEFAULTS[k] : k === 'thumbWidth' ? p.barWidth() : p.inset(k);
+						sl.sliderEl.addClass('nm-slider-gliding');
+						const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+						const dur = reduce || from === to ? 0 : 380;
+						const t0 = performance.now();
+						const step = (now) => {
+							const t = dur ? Math.min(1, (now - t0) / dur) : 1;
+							const e = 1 - Math.pow(1 - t, 3); // ease-out
+							sl.setValue(from + (to - from) * e);
+							if (t < 1) requestAnimationFrame(step);
+							else {
+								sl.setValue(to);
+								sl.sliderEl.removeClass('nm-slider-gliding');
+							}
+						};
+						requestAnimationFrame(step);
+					}
 					await p.saveSettings();
-					const box = this.containerEl;
-					const top = box.scrollTop;
-					this.display();
-					box.scrollTop = top;
 				})
 		);
 		return setting;
 	}
 
-	// A colour picker plus a hex text box that stay in sync. Empty text = '' (theme default).
+	// One colour setting. A row with "Auto" and "Custom" switches between following the theme and using your own
+	// colour. Custom opens a panel holding the hex box, the picker and the quick picks. Typing a code or tapping a
+	// colour makes it Custom; tapping Auto goes back to the theme, and tapping Custom again brings back the last
+	// custom colour.
 	addColorSetting(containerEl, { name, desc, key, fallback }) {
 		const p = this.plugin;
 		let picker = null;
 		let text = null;
+		if (!p._lastCustomColour) p._lastCustomColour = {};
+		const remember = (hex) => {
+			if (hex) p._lastCustomColour[key] = hex;
+		};
+		remember(p.settings[key]);
 
-		const swatchButtons = []; // { btn, hex } for the quick picks below
+		const swatchButtons = []; // { btn, hex, tick } for the quick picks
+		let autoBtn = null;
+		let customBtn = null;
+		let customDot = null;
+		let panel = null;
+		// Custom was tapped but no colour has been chosen yet: the panel is open with an empty box, and the colour
+		// stays on the theme until a code is typed or a colour is picked.
+		let pendingCustom = false;
+		let panelOpen = null; // unknown until the first draw, which sets it without animating
+		let panelAnim = null;
+		let inner = null;
+
+		// Opens or closes the panel. Opening: the page layout changes once and the contents fade and slide in (cheap on
+		// a phone). Closing: the panel shrinks back to its small size over a longer, softer curve. While it shrinks the
+		// settings below it are given their own graphics layers, so they glide up without being redrawn on every frame.
+		let endClose = null; // stops a close that is still running and puts everything back
+		const setPanelOpen = (open) => {
+			if (!panel || open === panelOpen) return;
+			const first = panelOpen === null;
+			panelOpen = open;
+			if (endClose) endClose(false);
+			if (panelAnim) {
+				panelAnim.onfinish = null;
+				panelAnim.cancel();
+				panelAnim = null;
+			}
+			const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+			if (first || reduced || !inner.animate || !panel.animate) {
+				panel.toggleClass('is-closed', !open);
+				return;
+			}
+			if (open) {
+				panel.removeClass('is-closed');
+				panelAnim = inner.animate(
+					[
+						{ opacity: 0, transform: 'translateY(-14px)' },
+						{ opacity: 1, transform: 'translateY(0)' },
+					],
+					{ duration: 260, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' }
+				);
+				panelAnim.onfinish = () => {
+					panelAnim = null;
+				};
+				return;
+			}
+
+			const full = panel.offsetHeight;
+			const below = [];
+			for (let n = setting.settingEl.nextElementSibling; n && below.length < 40; n = n.nextElementSibling) below.push(n);
+			for (const n of below) n.style.willChange = 'transform';
+			panel.addClass('nm-colour-collapsing');
+			const hAnim = panel.animate([{ height: full + 'px', marginTop: '0px' }, { height: '0px', marginTop: '-12px' }], {
+				duration: 460,
+				easing: 'cubic-bezier(0.32, 0.72, 0, 1)',
+				fill: 'forwards',
+			});
+			const fAnim = inner.animate(
+				[
+					{ opacity: 1, transform: 'translateY(0)' },
+					{ opacity: 0, transform: 'translateY(-18px)' },
+				],
+				{ duration: 300, easing: 'ease-in', fill: 'forwards' }
+			);
+			panelAnim = hAnim;
+			endClose = (finished) => {
+				endClose = null;
+				hAnim.onfinish = null;
+				panel.toggleClass('is-closed', finished);
+				hAnim.cancel();
+				fAnim.cancel();
+				panel.removeClass('nm-colour-collapsing');
+				for (const n of below) n.style.willChange = '';
+				if (panelAnim === hAnim) panelAnim = null;
+			};
+			hAnim.onfinish = () => endClose && endClose(true);
+		};
+
 		const markSelected = () => {
 			const cur = p.settings[key] || '';
+			const custom = cur !== '' || pendingCustom;
 			for (const { btn, hex, tick } of swatchButtons) {
 				const on = hex === cur;
 				btn.toggleClass('is-selected', on);
@@ -1880,9 +3382,90 @@ class MinimapSettingTab extends PluginSettingTab {
 				});
 				lockStyle(tick, { display: on ? 'inline-flex' : 'none' });
 			}
+			if (autoBtn) {
+				autoBtn.toggleClass('is-selected', !custom);
+				autoBtn.setAttr('aria-pressed', custom ? 'false' : 'true');
+			}
+			if (customBtn) {
+				customBtn.toggleClass('is-selected', custom);
+				customBtn.setAttr('aria-pressed', custom ? 'true' : 'false');
+				if (customDot) customDot.style.background = custom ? cur : 'transparent';
+			}
+			setPanelOpen(custom);
+		};
+
+		// Sets a custom colour from anywhere (hex box, picker, quick pick, the Custom button).
+		const setColour = async (hex) => {
+			pendingCustom = false;
+			p.settings[key] = hex;
+			remember(hex);
+			if (text) {
+				text.setValue(hex);
+				text.inputEl.removeClass('nm-input-error');
+			}
+			if (picker) picker.setValue(hex);
+			markSelected();
+			await p.saveSettings();
+		};
+
+		const setAuto = async () => {
+			pendingCustom = false;
+			p.settings[key] = '';
+			if (text) {
+				text.setValue('');
+				text.inputEl.removeClass('nm-input-error');
+			}
+			markSelected();
+			await p.saveSettings();
 		};
 
 		const setting = new Setting(containerEl).setName(name).setDesc(desc);
+		setting.settingEl.addClass('nm-swatch-setting');
+		lockStyle(setting.settingEl, { 'flex-direction': 'column', 'align-items': 'stretch', gap: '8px' });
+		lockStyle(setting.controlEl, {
+			display: 'flex',
+			'flex-direction': 'column',
+			'align-items': 'stretch',
+			'justify-content': 'flex-start',
+			width: '100%',
+			gap: '12px',
+		});
+
+		// Auto / Custom switch.
+		const modes = setting.controlEl.createDiv({ cls: 'nm-colour-modes' });
+		autoBtn = modes.createEl('button', {
+			cls: 'nm-colour-mode',
+			attr: { type: 'button', 'aria-label': 'Follow the theme' },
+		});
+		autoBtn.createSpan({ text: 'Auto' });
+		setIcon(autoBtn.createSpan({ cls: 'nm-swatch-tick' }), 'check');
+		autoBtn.addEventListener('click', () => {
+			if (p.settings[key] || pendingCustom) setAuto();
+		});
+
+		customBtn = modes.createEl('button', {
+			cls: 'nm-colour-mode',
+			attr: { type: 'button', 'aria-label': 'Use a custom colour' },
+		});
+		customDot = customBtn.createSpan({ cls: 'nm-colour-dot' });
+		customBtn.createSpan({ text: 'Custom' });
+		setIcon(customBtn.createSpan({ cls: 'nm-swatch-tick' }), 'check');
+		customBtn.addEventListener('click', () => {
+			if (p.settings[key] || pendingCustom) return;
+			const last = p._lastCustomColour[key];
+			if (last) {
+				setColour(last); // going back to a custom colour you already chose
+			} else {
+				pendingCustom = true; // first time: an empty box waiting for a code
+				if (text) text.setValue('');
+				markSelected();
+			}
+		});
+
+		// Custom panel: it opens and closes with a slide.
+		panel = setting.controlEl.createDiv({ cls: 'nm-colour-panel' });
+		inner = panel.createDiv({ cls: 'nm-colour-panel-inner' });
+		const inputs = inner.createDiv({ cls: 'nm-colour-inputs' });
 
 		setting.addText((t) => {
 			text = t;
@@ -1895,27 +3478,17 @@ class MinimapSettingTab extends PluginSettingTab {
 			el.setAttribute('spellcheck', 'false');
 			el.setAttribute('maxlength', '7');
 			el.setAttribute('enterkeyhint', 'done');
-
-			const apply = async (hex) => {
-				el.removeClass('nm-input-error');
-				p.settings[key] = hex;
-				if (picker) picker.setValue(hex);
-				markSelected();
-				await p.saveSettings();
-			};
+			inputs.appendChild(el);
 
 			// Typing never rewrites what you typed. Only a complete 6-digit code is applied
 			// while typing; a short code like "cac" is left alone until you finish (blur / Enter).
-			t.setPlaceholder(fallback)
+			t.setPlaceholder('Input hex code')
 				.setValue(p.settings[key] || '')
 				.onChange(async (v) => {
 					const raw = v.trim();
 					if (raw === '') {
 						el.removeClass('nm-input-error');
-						p.settings[key] = '';
-						markSelected();
-						await p.saveSettings();
-						return;
+						return; // an empty box while typing changes nothing; Auto is its own button
 					}
 					const body = raw.replace(/^#/, '');
 					if (!/^[0-9a-fA-F]*$/.test(body) || body.length > 6) {
@@ -1923,7 +3496,7 @@ class MinimapSettingTab extends PluginSettingTab {
 						return;
 					}
 					if (body.length === 6) {
-						await apply('#' + body.toLowerCase());
+						await setColour('#' + body.toLowerCase());
 						return;
 					}
 					el.removeClass('nm-input-error'); // still typing
@@ -1931,14 +3504,18 @@ class MinimapSettingTab extends PluginSettingTab {
 
 			const finish = async () => {
 				const raw = el.value.trim();
-				if (raw === '') return;
+				if (raw === '') {
+					el.value = p.settings[key] || ''; // nothing typed: put the current colour back
+					el.removeClass('nm-input-error');
+					return;
+				}
 				const hex = normalizeHex(raw);
 				if (!hex) {
 					el.addClass('nm-input-error');
 					return;
 				}
 				el.value = hex; // 3-digit shorthand is expanded only now
-				await apply(hex);
+				await setColour(hex);
 			};
 			el.addEventListener('blur', finish);
 			el.addEventListener('keydown', (e) => {
@@ -1951,51 +3528,20 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		setting.addColorPicker((c) => {
 			picker = c;
-			c.setValue(p.settings[key] || fallback).onChange(async (v) => {
-				p.settings[key] = v;
-				if (text) {
-					text.setValue(v);
-					text.inputEl.removeClass('nm-input-error');
-				}
-				markSelected();
-				await p.saveSettings();
+			c.setValue(p.settings[key] || p._lastCustomColour[key] || fallback).onChange(async (v) => {
+				await setColour(v);
 			});
+			inputs.appendChild(c.colorPickerEl);
 		});
 
-		// Quick picks: tap a swatch to use that colour. Read from the live theme, so they follow it.
-		const pick = async (hex) => {
-			p.settings[key] = hex;
-			if (text) {
-				text.setValue(hex);
-				text.inputEl.removeClass('nm-input-error');
-			}
-			if (picker && hex) picker.setValue(hex);
-			markSelected();
-			await p.saveSettings();
-			p.toast(name + ': ' + (hex || 'follows theme accent'), 700);
-		};
-
-		const sw = new Setting(containerEl)
-			.setName(name + ' quick picks')
-			.setDesc('Colours taken from your current theme, so they change when your theme or wallpaper accent does. Tap one to use it.');
-		sw.settingEl.addClass('nm-swatch-setting');
-		lockStyle(sw.settingEl, { 'flex-direction': 'column', 'align-items': 'stretch', gap: '8px' });
-		lockStyle(sw.controlEl, {
-			display: 'flex',
-			'flex-direction': 'column',
-			'align-items': 'stretch',
-			'justify-content': 'flex-start',
-			width: '100%',
-			gap: '12px',
-		});
-
-		const addSwatch = (grid, hex, label, auto) => {
+		// Quick picks inside the panel: tap a swatch to use that colour. Read from the live theme, so they follow it.
+		const addSwatch = (grid, hex, label) => {
 			const btn = grid.createEl('button', {
-				cls: 'nm-swatch' + (auto ? ' nm-swatch-auto' : ''),
+				cls: 'nm-swatch',
 				attr: {
 					type: 'button',
-					'aria-label': label + (hex ? ' ' + hex : ''),
-					title: label + (hex ? ' ' + hex : ''),
+					'aria-label': label + ' ' + hex,
+					title: label + ' ' + hex,
 				},
 			});
 			// Fixed-size pill. Set inline (and !important) so theme or mobile button styles, or a stale
@@ -2024,18 +3570,13 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		let groups = [];
 		try {
-			groups = collectSwatchGroups(sw.controlEl);
+			groups = collectSwatchGroups(inner);
 		} catch (e) {
 			console.error('My Note Minimap: could not read theme colours', e);
 		}
 
-		if (!groups.length) {
-			sw.setDesc('No theme colours could be read. Use the hex box or picker above.');
-			return;
-		}
-
-		groups.forEach((g, gi) => {
-			const group = sw.controlEl.createDiv({ cls: 'nm-swatch-group' });
+		for (const g of groups) {
+			const group = inner.createDiv({ cls: 'nm-swatch-group' });
 			lockStyle(group, { width: '100%' });
 			const label = group.createDiv({ cls: 'nm-swatch-label', text: g.label });
 			lockStyle(label, { 'text-align': 'left', width: '100%', 'margin-bottom': '6px' });
@@ -2048,30 +3589,15 @@ class MinimapSettingTab extends PluginSettingTab {
 				gap: '10px',
 				width: '100%',
 			});
-
-			if (gi === 0) {
-				// "Theme": clears the colour so the plugin follows the theme accent on its own.
-				const auto = addSwatch(grid, '', 'Follow theme accent', true);
-				auto.createSpan({ cls: 'nm-swatch-auto-text', text: 'Auto' });
-				lockStyle(auto, {
-					background: 'var(--interactive-accent)',
-					color: 'var(--text-on-accent, #ffffff)',
-				});
-				const tick = auto.createSpan({ cls: 'nm-swatch-tick' });
-				setIcon(tick, 'check');
-				auto.addEventListener('click', () => pick(''));
-				swatchButtons.push({ btn: auto, hex: '', tick });
-			}
-
 			for (const item of g.items) {
-				const btn = addSwatch(grid, item.hex, item.name, false);
+				const btn = addSwatch(grid, item.hex, item.name);
 				lockStyle(btn, { background: item.hex, color: readableOn(item.hex) });
 				const tick = btn.createSpan({ cls: 'nm-swatch-tick' });
 				setIcon(tick, 'check');
-				btn.addEventListener('click', () => pick(item.hex));
+				btn.addEventListener('click', () => setColour(item.hex));
 				swatchButtons.push({ btn, hex: item.hex, tick });
 			}
-		});
+		}
 
 		markSelected();
 	}
@@ -2080,7 +3606,7 @@ class MinimapSettingTab extends PluginSettingTab {
 		const p = this.plugin;
 		const ex = new Setting(containerEl)
 			.setName('Exclusions')
-			.setDesc('Files or folders (vault paths) that should not show a minimap.');
+			.setDesc('Files or folders that should not show the bar.');
 		ex.settingEl.addClass('nm-exclusion-setting');
 
 		const wrap = ex.controlEl.createDiv({ cls: 'nm-exclusion-input-wrap nm-validation-relative' });
@@ -2138,5 +3664,5 @@ class MinimapSettingTab extends PluginSettingTab {
 	}
 }
 
-NoteMinimapPlugin.classify = classify;
+NoteMinimapPlugin.classify = (text) => classify(text, 0).items;
 module.exports = NoteMinimapPlugin;
