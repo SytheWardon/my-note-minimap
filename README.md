@@ -30,7 +30,6 @@ The arrows sit at the top and bottom ends of the scrollbar.
 - At the very top or bottom of a note the arrow gives a small bump instead of scrolling.
 - Turn them off, or change their size, under Settings → My Note Minimap → *Arrow buttons*.
 
-
 ## Screen refresh rate
 
 Arrow scrolling is timed to your screen. On a phone the plugin asks once for your refresh rate (60, 90, 120 or 144 Hz) and can measure it for you: tap *Measure* and keep a finger moving on the box. Change it any time under Settings → My Note Minimap → *Screen refresh rate*. Leave it on *Automatic* if you are not sure; a value that does not match how the screen really behaves is ignored. While you hold an arrow, every redraw moves the note by the same whole number of screen pixels, which removes the faint shimmer of uneven steps.
@@ -51,6 +50,43 @@ The **scrollbar** style is light and smooth. The **minimap** style is very deman
 - **Gentler refresh while typing:** the minimap waits about 0.8 s after you stop typing (instead of 0.3 s) before rebuilding, and notes in background tabs are rebuilt when you switch back to them rather than while you type in another one.
 
 The scrollbar style is already light, so Fast rendering has no effect on it.
+
+## What's new in 3.0.0
+
+- **Hold speed now starts at 200 px/s** (down from 320), a calmer pace that is easier to follow with the eyes. If you were still on the old default of 320 it switches over by itself; any other value you chose is kept. Change it any time under Settings → My Note Minimap → *Hold speed*.
+- **General clean-up.** Removed two leftover style rules that nothing used any more, and folded the two rules that shaped the settings' minus and plus buttons into one. Nothing looks or behaves differently from 2.0.50 apart from the hold speed.
+- This is a milestone release: it rolls up everything since 2.0, including the bar animation on by default, the first-run refresh-rate and Quick Action setup, the reading-view smoothness work and a stylesheet free of `!important`.
+
+## What's new in 2.0.50
+
+- **Holding an arrow in reading view: the late frame every 0.2 s is fixed at its source.** Scroll diagnostics from a note full of equations showed 213 "re-plans" in an 18 s hold, 47 late frames that were not the plugin's own work (the plugin's share was 0.5 ms per frame), and a worst frame of 267 ms. In Obsidian, a reading view is drawn in slices: each pass draws at least ten sections that are not drawn yet (always from the top of the note, whatever is on screen), measures them, and queues the next pass for the very next frame. During a hold those passes shared every frame with the scroll, and a pass over equations can take 100 ms or more. While you hold an arrow, those passes are now held back as long as everything from one screen behind to three screens ahead is already drawn. They carry on the moment the hold reaches a part that is not drawn yet, and for the rest of the note when the hold ends. Part of *Faster loading and smoother holding*.
+- **Scroll diagnostics** now has a *Reading view render passes* line (how many, average and worst time, and how many were held back) next to the re-plans line.
+
+## What's new in 2.0.49
+
+- **Taken back: the extra reading-view planning during a hold (added in 2.0.48).** Scroll diagnostics from a note full of equations showed it made things worse: 38 extra plans and 38 late frames that were not the plugin's own work, averaging well over 100 ms each. Each plan costs a lot on a note like that, so doing it more often only multiplied the cost. Obsidian's own, less frequent planning is back.
+- **Scroll diagnostics now times Obsidian's own reading-view planning** during a hold (*Reading view re-plans: count, average and worst time*), so the next report shows whether those plans are what the late frames are made of.
+- **Start-up no longer waits for a view that cannot be rendered yet.** The report showed *ready in 900 ms* with nothing done to a note: the reading view is hidden behind the loading screen and never finishes there, so the plugin simply waited out its time limit. It now skips a hidden view straight away; the maths and code loading and the bar layers are still done behind the loading screen.
+
+## What's new in 2.0.48
+
+- **New setting: *Get ready while Obsidian starts*** (on by default). Obsidian shows your last note on a loading screen while it loads everything underneath, and only takes that screen away once the workspace is built. The plugin now does its first-time work in that gap, with a time limit (0.9 s on a phone): the header and bottom bar are put on their own graphics layers, the maths and code-colouring code is loaded if an open note uses it, a reading view is rendered to the end, and an editor draws the stretch below the screen. Before, all of this waited until after the app had opened, so the first scroll and the first slide of the bars paid for it. Takes effect the next time Obsidian starts. *Scroll diagnostics* shows a *Start-up* line with how long it took.
+- **(Taken back in 2.0.49.) Holding an arrow in reading view: the hitch about every 1100 px is spread out.** Obsidian re-plans which parts of a reading view are attached only every half screen or so of travel, and each re-plan attaches and measures several sections in one frame, which showed as a freeze followed by a jump. While you hold an arrow, the same planning now runs about every 100 px, so only one section changes at a time. Part of *Faster loading and smoother holding*.
+
+## What's new in 2.0.47
+
+- **Animate top and bottom bars is now on by default.** New installs get the slide-and-fade of the header and bottom bar right away. If you already had the setting saved, your choice is kept; change it any time under Settings → My Note Minimap → *Animate top and bottom bars*.
+- **First-run setup also turns the pull-down Quick Action off.** After the refresh-rate pop-up that appears the first time, the plugin opens Obsidian's Mobile settings and sets *Configure mobile Quick Action* to none, so pulling down from the top no longer opens a menu. This happens once, only on a phone or tablet, and only from the pop-up that appears by itself (not when you tap *Measure* in the plugin's settings). You can set the Quick Action again any time under Settings → Mobile.
+- The stylesheet no longer uses `!important` anywhere; the same rules win through more specific selectors instead (2.0.46).
+
+## What's new in 2.0.45
+
+- **New setting: *Animate top and bottom bars*** (Settings → My Note Minimap). It slides and fades the header and the bottom bar out of the way while you scroll and brings them back when you stop. Choose *Slide and fade*, *Slide only* or *Fade only*, and how long it takes (*Bar animation speed*, 150 to 900 ms). Off by default.
+  - Both ways the bars can leave now use one set of rules: this plugin's own (holding an arrow, or dragging the strip) and Obsidian's own hide-on-scroll. Obsidian gives the header and the bottom bar different curves and lengths, and a different distance to travel, so with both in play the bars moved twice; now they move once, together, on the same curve.
+  - The soft fade at the top of the note (floating bars) now shrinks along with the header instead of snapping away the instant the bars hide.
+  - The blur behind the bars comes back only after they have finished sliding. It used to come back the moment the note stopped, which is exactly when the bars slide back in, and that showed as a stutter as they appeared.
+- **Holding an arrow: a jump when the editor drew ahead is fixed.** When draw ahead made the editor draw the next stretch, the editor's correction for the shift was measured at the wrong line (one on the screen, not the one at the top), so a block that changed height on screen moved the whole note by that much when the position was put back. The shift is now measured at the line at the top of the screen.
+- **New setting: *Hold back jumps*** (on by default). While you hold an arrow, one line near the top of the screen is used as a ruler. If the note suddenly moves by more than the text above that line did, the move is put back instead of being kept. *Scroll diagnostics* now reports how many such jumps it saw (and held back). If holding feels worse, turn it off; the diagnostics still count them.
 
 ## What's new in 2.0.44
 

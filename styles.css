@@ -391,26 +391,69 @@
 	65% { transform: translate(-50%, calc(-50% - 1px)) scale(1.1); }
 }
 
-/* ---- Top header and bottom bar: ease in and out while the strip scrolls the note ----
-   Slide and fade together, as the earlier 1.4.x releases did. Both bars are kept on their own graphics layers
-   for as long as the animation setting is on: building two big layers on the first frame of the slide, at the
-   same moment, was what made the slide start with a hitch. */
+/* ---- Top header and bottom bar: ease in and out while the note scrolls ----
+   One set of rules drives both ways the bars can leave: this plugin's own (nm-bars-hidden, set while the strip or an
+   arrow scrolls the note) and Obsidian's hide-on-scroll (is-hidden-nav). Obsidian gives the header and the bottom bar
+   different curves and lengths (0.3 s ease-in-out and 0.3 s ease-out, opacity 0.2 s) and a different distance to travel,
+   so when both were in play the bars moved twice: once Obsidian's way, then ours. Now both ways use the same distance,
+   the same curve and the same length, and the length is yours (--nm-bars-ms, Settings > Bar animation speed).
+   Both bars are kept on their own graphics layers for as long as the setting is on: building two big layers on the
+   first frame of the slide, at the same moment, was what made the slide start with a hitch. Only transform and
+   opacity change, so the slide runs on the graphics side and does not wait for the page. */
 html body.nm-animate-bars.nm-animate-bars .mobile-navbar,
 html body.nm-animate-bars.nm-animate-bars .view-header {
-	transition: transform 0.45s cubic-bezier(0.22, 0.9, 0.25, 1), opacity 0.35s ease;
+	transition: transform var(--nm-bars-ms, 450ms) cubic-bezier(0.22, 0.9, 0.25, 1), opacity calc(var(--nm-bars-ms, 450ms) * 0.78) ease;
 	will-change: transform, opacity;
 }
 
-html body.nm-animate-bars.nm-bars-hidden .mobile-navbar {
+html body.nm-animate-bars.nm-bars-hidden .mobile-navbar,
+html body.nm-animate-bars.is-hidden-nav .mobile-navbar {
 	transform: translateY(calc(100% + 28px));
 	opacity: 0;
 	pointer-events: none;
 }
 
-html body.nm-animate-bars.nm-bars-hidden .view-header {
+html body.nm-animate-bars.nm-bars-hidden .view-header,
+html body.nm-animate-bars.is-hidden-nav .view-header {
 	transform: translateY(calc(-100% - 28px));
 	opacity: 0;
 	pointer-events: none;
+}
+
+/* Fade only: the bars stay where they are and fade. Slide only: they move away at full strength. */
+html body.nm-animate-bars.nm-bars-fade-only.nm-bars-hidden .mobile-navbar,
+html body.nm-animate-bars.nm-bars-fade-only.is-hidden-nav .mobile-navbar,
+html body.nm-animate-bars.nm-bars-fade-only.nm-bars-hidden .view-header,
+html body.nm-animate-bars.nm-bars-fade-only.is-hidden-nav .view-header {
+	transform: none;
+}
+
+html body.nm-animate-bars.nm-bars-slide-only.nm-bars-hidden .mobile-navbar,
+html body.nm-animate-bars.nm-bars-slide-only.is-hidden-nav .mobile-navbar,
+html body.nm-animate-bars.nm-bars-slide-only.nm-bars-hidden .view-header,
+html body.nm-animate-bars.nm-bars-slide-only.is-hidden-nav .view-header {
+	opacity: 1;
+}
+
+/* The soft fade at the top of the note (Obsidian's floating bars dim the text under the header). Obsidian swaps that
+   fade for a short one the instant the bars hide, which showed as a pop at the start of the slide. Here the length of
+   the fade follows the bars instead, over the same time and curve. Only for floating bars, and only while the setting
+   is on; where --nm-fade-k cannot be animated the fade simply swaps at once, as Obsidian does. */
+@property --nm-fade-k {
+	syntax: '<number>';
+	inherits: false;
+	initial-value: 1;
+}
+
+html body.nm-animate-bars.is-phone.is-floating-nav .mod-root .workspace-leaf-content[data-type="markdown"] .view-content {
+	--nm-fade-k: 1;
+	mask-image: linear-gradient(to bottom, rgba(0, 0, 0, var(--view-top-fade-opacity)) 0%, #000000 calc(var(--safe-area-inset-top) + (var(--view-header-height) + 12px) * var(--nm-fade-k)));
+	transition: --nm-fade-k var(--nm-bars-ms, 450ms) cubic-bezier(0.22, 0.9, 0.25, 1);
+}
+
+html body.nm-animate-bars.nm-bars-hidden.is-phone.is-floating-nav .mod-root .workspace-leaf-content[data-type="markdown"] .view-content,
+html body.nm-animate-bars.is-hidden-nav.is-phone.is-floating-nav .mod-root .workspace-leaf-content[data-type="markdown"] .view-content {
+	--nm-fade-k: 0;
 }
 
 /* ---- Header button: hand icon with a round notch and an eye-with-a-slash while the scrollbar is hidden ---- */
@@ -536,6 +579,10 @@ html body.nm-animate-bars.nm-bars-hidden .view-header {
 
 	.nm-hand-btn.nm-strip-off .nm-eye-shape {
 		animation: none;
+	}
+
+	html body.nm-animate-bars.is-phone.is-floating-nav .mod-root .workspace-leaf-content[data-type="markdown"] .view-content {
+		transition-duration: 0.01s;
 	}
 }
 
@@ -689,11 +736,6 @@ html body.nm-animate-bars.nm-bars-hidden .view-header {
 	cursor: pointer;
 }
 
-.nm-swatch-setting .nm-swatch-grid button.nm-swatch.nm-swatch-auto {
-	font-size: var(--font-ui-smaller, 12px);
-	font-weight: 600;
-}
-
 .nm-swatch-setting .nm-swatch-grid button.nm-swatch:hover {
 	filter: brightness(1.1);
 }
@@ -716,11 +758,6 @@ html body.nm-animate-bars.nm-bars-hidden .view-header {
 
 .nm-swatch-setting .nm-swatch-grid button.nm-swatch.is-selected .nm-swatch-tick {
 	display: inline-flex;
-}
-
-/* The "Auto" chip shows its label until selected, then a tick next to it. */
-.nm-swatch-auto .nm-swatch-tick {
-	margin-left: 4px;
 }
 
 /* Exclusions: input, validation and a removable tag cloud. */
@@ -871,20 +908,20 @@ html body.nm-animate-bars.nm-bars-hidden .view-header {
 
 /* The pop-up that holds the refresh-rate menu. Only opacity and position change, so it stays smooth on a phone: the
    backdrop fades, and the panel rises into place with a soft overshoot. The same in reverse when it closes. */
-.nm-hz-container .modal-bg {
-	animation: nm-hz-bg-in 0.26s ease both !important;
-	-webkit-backdrop-filter: none !important;
-	backdrop-filter: none !important;
+.modal-container.nm-hz-container .modal-bg {
+	animation: nm-hz-bg-in 0.26s ease both;
+	-webkit-backdrop-filter: none;
+	backdrop-filter: none;
 }
-.nm-hz-container .modal.nm-hz-box {
-	animation: nm-hz-box-in 0.34s cubic-bezier(0.2, 0.9, 0.25, 1.08) both !important;
+.modal-container.nm-hz-container .modal.nm-hz-box {
+	animation: nm-hz-box-in 0.34s cubic-bezier(0.2, 0.9, 0.25, 1.08) both;
 	will-change: transform, opacity;
 }
-.nm-hz-container.nm-hz-closing .modal-bg {
-	animation: nm-hz-bg-out 0.19s ease-in both !important;
+.modal-container.nm-hz-container.nm-hz-closing .modal-bg {
+	animation: nm-hz-bg-out 0.19s ease-in both;
 }
-.nm-hz-container.nm-hz-closing .modal.nm-hz-box {
-	animation: nm-hz-box-out 0.19s ease-in both !important;
+.modal-container.nm-hz-container.nm-hz-closing .modal.nm-hz-box {
+	animation: nm-hz-box-out 0.19s ease-in both;
 }
 @keyframes nm-hz-bg-in { from { opacity: 0; } to { opacity: 1; } }
 @keyframes nm-hz-bg-out { from { opacity: 1; } to { opacity: 0; } }
@@ -897,8 +934,10 @@ html body.nm-animate-bars.nm-bars-hidden .view-header {
 	to { opacity: 0; transform: translateY(28px) scale(0.97); }
 }
 @media (prefers-reduced-motion: reduce) {
-	.nm-hz-container .modal-bg,
-	.nm-hz-container .modal.nm-hz-box { animation: none !important; }
+	.modal-container.nm-hz-container .modal-bg,
+	.modal-container.nm-hz-container .modal.nm-hz-box,
+	.modal-container.nm-hz-container.nm-hz-closing .modal-bg,
+	.modal-container.nm-hz-container.nm-hz-closing .modal.nm-hz-box { animation: none; }
 }
 
 /* Refresh-rate question / measuring box */
@@ -1003,12 +1042,12 @@ html body.nm-animate-bars.nm-bars-hidden .view-header {
 
 /* While an arrow is held (see liteOn in main.js): no blur behind the header, bottom bar or toolbar, so the
    graphics chip is not redoing it on every frame of the scroll. Back as soon as the note stops. */
-html body.nm-hold-lite .view-header,
-html body.nm-hold-lite .mobile-navbar,
-html body.nm-hold-lite .mobile-toolbar,
-html body.nm-hold-lite .workspace-tab-header-container {
-	-webkit-backdrop-filter: none !important;
-	backdrop-filter: none !important;
+html body.nm-hold-lite.nm-hold-lite .view-header,
+html body.nm-hold-lite.nm-hold-lite .mobile-navbar,
+html body.nm-hold-lite.nm-hold-lite .mobile-toolbar,
+html body.nm-hold-lite.nm-hold-lite .workspace-tab-header-container {
+	-webkit-backdrop-filter: none;
+	backdrop-filter: none;
 }
 
 /* ---- Settings: sliders. One row holds [-] [slider] [+] [number]; nothing in it can grow past the screen. ---- */
@@ -1032,11 +1071,18 @@ html body.nm-hold-lite .workspace-tab-header-container {
 	box-sizing: border-box;
 }
 
+.setting-item .nm-slider-row button.nm-step-btn {
+	flex: 0 0 40px;
+	width: 40px;
+	min-width: 40px;
+	max-width: 40px;
+	/* The minus and plus are drawn as bars from the exact middle of the button (see ::before / ::after below), so
+	   they never sit high or low the way a text character does. That is why the text itself is hidden. */
+	position: relative;
+	font-size: 0;
+	overflow: hidden;
+}
 .nm-slider-row .nm-step-btn {
-	flex: 0 0 40px !important;
-	width: 40px !important;
-	min-width: 40px !important;
-	max-width: 40px !important;
 	height: 34px;
 	margin: 0;
 	padding: 0;
@@ -1052,13 +1098,6 @@ html body.nm-hold-lite .workspace-tab-header-container {
 	user-select: none;
 	-webkit-touch-callout: none;
 	transition: transform 0.12s cubic-bezier(0.34, 1.56, 0.64, 1), background-color 0.15s ease;
-}
-/* The minus and plus are drawn as bars from the exact middle of the button, so they never sit high or low the way a
-   text character does. */
-.nm-slider-row .nm-step-btn {
-	position: relative;
-	font-size: 0 !important;
-	overflow: hidden;
 }
 .nm-slider-row .nm-step-btn::before,
 .nm-slider-row .nm-step-btn.nm-step-plus::after {
@@ -1118,42 +1157,42 @@ html body.nm-hold-lite .workspace-tab-header-container {
 	border-radius: 999px;
 	background: var(--interactive-accent);
 }
-.nm-slider-wrap input[type="range"] {
-	-webkit-appearance: none !important;
-	appearance: none !important;
-	position: absolute !important;
-	left: 0 !important;
-	top: 0 !important;
-	width: 100% !important;
-	min-width: 0 !important;
-	max-width: none !important;
-	height: 22px !important;
-	margin: 0 !important;
-	padding: 0 !important;
-	background: transparent !important;
+.setting-item .nm-slider-row .nm-slider-wrap input[type="range"] {
+	-webkit-appearance: none;
+	appearance: none;
+	position: absolute;
+	left: 0;
+	top: 0;
+	width: 100%;
+	min-width: 0;
+	max-width: none;
+	height: 22px;
+	margin: 0;
+	padding: 0;
+	background: transparent;
 	cursor: pointer;
 	touch-action: pan-y;
 }
-.nm-slider-wrap input[type="range"]::-webkit-slider-runnable-track {
-	box-sizing: border-box !important;
-	height: 22px !important;
-	border: none !important;
-	border-radius: 0 !important;
-	background: transparent !important;
-	box-shadow: none !important;
+.setting-item .nm-slider-row .nm-slider-wrap input[type="range"]::-webkit-slider-runnable-track {
+	box-sizing: border-box;
+	height: 22px;
+	border: none;
+	border-radius: 0;
+	background: transparent;
+	box-shadow: none;
 }
-.nm-slider-wrap input[type="range"]::-webkit-slider-thumb {
-	-webkit-appearance: none !important;
-	appearance: none !important;
-	box-sizing: border-box !important;
-	width: var(--nm-thumb-w) !important;
-	height: 22px !important;
-	margin: 0 !important;
-	border-radius: 999px !important;
-	border: none !important;
-	background: transparent !important;
-	box-shadow: none !important;
-	opacity: 0 !important;
+.setting-item .nm-slider-row .nm-slider-wrap input[type="range"]::-webkit-slider-thumb {
+	-webkit-appearance: none;
+	appearance: none;
+	box-sizing: border-box;
+	width: var(--nm-thumb-w);
+	height: 22px;
+	margin: 0;
+	border-radius: 999px;
+	border: none;
+	background: transparent;
+	box-shadow: none;
+	opacity: 0;
 }
 .nm-slider-wrap input[type="range"]::-moz-range-track {
 	height: 22px;

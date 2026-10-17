@@ -1,6 +1,12 @@
 'use strict';
 
-const { Plugin, MarkdownView, PluginSettingTab, Setting, Platform, Notice, Modal, debounce, setIcon } = require('obsidian');
+const obsidian = require('obsidian');
+const { Plugin, MarkdownView, PluginSettingTab, Setting, Platform, Notice, Modal, debounce, setIcon } = obsidian;
+
+// Obsidian's own setting for the pull-down Quick Action (Settings > Mobile > Configure mobile Quick Action).
+// 'none' is the value Obsidian stores for "disabled"; kept in one place in case it ever needs to change.
+const QUICK_ACTION_KEY = 'mobilePullAction';
+const QUICK_ACTION_OFF = 'none';
 
 const DEFAULTS = {
 	style: 'scrollbar', // 'scrollbar' or 'minimap'
@@ -21,12 +27,16 @@ const DEFAULTS = {
 	showArrows: true,
 	arrowSize: 36, // px height of each arrow button (also its touch zone)
 	stepSize: 120, // px scrolled per arrow tap
-	holdSpeed: 320, // px per second while an arrow is held; slow enough for the eye to follow the text as it moves
+	holdSpeed: 200, // px per second while an arrow is held; slow enough for the eye to follow the text as it moves
 	smooth: true,
-	animateBars: false, // slide/fade the top header and bottom bar while scrolling with the strip
+	holdGuard: true, // while an arrow is held, a sudden jump of the note that the text did not make with it is put back, not kept
+	animateBars: true, // slide/fade the top header and bottom bar while scrolling (with the strip, and Obsidian's own hide-on-scroll)
+	barsMs: 450, // length of that slide, in milliseconds
+	barsStyle: 'slide-fade', // 'slide-fade', 'slide' or 'fade'
 	smoothMs: 340, // length of the glide animation
 	diagnostics: false, // after letting go of an arrow, show how smoothly the screen kept up
 	refreshRate: 0, // Hz of the screen. 0 = automatic (measured from the frame times); otherwise the scrolling is timed to it
+	startPrep: true, // get notes and animations ready behind Obsidian's loading screen, so the first scroll is smooth
 	refreshAsked: false, // the refresh-rate question is only asked once
 	holdLite: true, // faster loading (open from memory, leave the hidden reading view for later, read ahead) and, while an arrow is held, no blur behind the header and bottom bar and the editor draws the next stretch early
 	glowColor: '', // '' = same as thumb
@@ -386,10 +396,13 @@ class NoteMinimapPlugin extends Plugin {
 		// v10: "Draw ahead while holding" and "Lighter screen while holding" are one setting (holdLite). It stays on if
 		// either was on; the old key is dropped.
 		if ((saved.ver || 1) < 10) this.settings.holdLite = saved.holdLite !== false || saved.predraw === true;
+		// v11: the default hold speed is 200 px/s, a calmer pace still. The old default of 320 becomes the new one;
+		// any other value you chose is kept.
+		if ((saved.ver || 1) < 11 && saved.holdSpeed === 320) this.settings.holdSpeed = DEFAULTS.holdSpeed;
 		delete this.settings.predraw;
 		delete this.settings.pageIndicator; // removed feature: clear the leftover key
 		delete this.settings.fullscreen; // removed feature: clear the leftover key
-		this.settings.ver = 10;
+		this.settings.ver = 11;
 		this.states = new Map();
 		this._unloaded = false;
 		this._refreshQueued = false;
@@ -421,6 +434,7 @@ class NoteMinimapPlugin extends Plugin {
 			this.warmSoon();
 		}));
 		this.installLoadBoost();
+		this.installStartPrep();
 		// Only the note that was edited needs its minimap text re-read. The vault event covers changes
 		// that do not come from typing (sync, another app, the same note open in a second pane).
 		this.registerEvent(this.app.workspace.on('editor-change', (editor, info) => {
@@ -449,7 +463,7 @@ class NoteMinimapPlugin extends Plugin {
 			if (!Platform.isMobile || this.settings.refreshAsked) return;
 			this._askTimer = window.setTimeout(() => {
 				this._askTimer = null;
-				if (!this._unloaded && !this.settings.refreshAsked) new RefreshRateModal(this.app, this).open();
+				if (!this._unloaded && !this.settings.refreshAsked) new RefreshRateModal(this.app, this, null, true).open();
 			}, 250);
 		});
 
@@ -603,6 +617,9 @@ class NoteMinimapPlugin extends Plugin {
 	}
 
 	onunload() {
+		this.removeStartHook();
+		for (const st of this.states.values()) this.ungateRender(st, true);
+		this.untimePlans();
 		this._unloaded = true;
 		this.uninstallLoadBoost();
 		if (this._askTimer) clearTimeout(this._askTimer);
@@ -624,11 +641,31 @@ class NoteMinimapPlugin extends Plugin {
 		}
 		if (this.barsHidden === hidden) return;
 		this.barsHidden = hidden;
-		// The slide is a 0.45 s CSS transition. Draw ahead can block the page for a long frame, so it stays out of the
-		// way until the slide is over (see cruiseTick); a stalled frame in the middle of the slide reads as a snap.
-		this._barsMoveUntil = performance.now() + 520;
+		// The slide is a CSS transition (barsMs long, 0.45 s by default). Draw ahead can block the page for a long frame,
+		// so it stays out of the way until the slide is over (see cruiseTick); a stalled frame in the middle of the
+		// slide reads as a snap.
+		this._barsMoveUntil = performance.now() + this.barsMs() + 70;
 		document.body.toggleClass('nm-bars-hidden', hidden);
 		if (this.settings.diagnostics) this.probeBars(hidden);
+	}
+
+	// Length of the bars' slide, kept inside sane limits.
+	barsMs() {
+		const v = Number(this.settings.barsMs);
+		return Math.min(900, Math.max(120, isFinite(v) && v > 0 ? v : 450));
+	}
+
+	// Puts the chosen speed and style of the bars' slide on the body, where the stylesheet reads them.
+	applyBarsLook() {
+		const b = document.body;
+		b.style.setProperty('--nm-bars-ms', this.barsMs() + 'ms');
+		b.toggleClass('nm-bars-slide-only', this.settings.barsStyle === 'slide');
+		b.toggleClass('nm-bars-fade-only', this.settings.barsStyle === 'fade');
+	}
+
+	// True while the bars are away or still moving.
+	barsBusy() {
+		return !!this.barsHidden || performance.now() < (this._barsMoveUntil || 0);
 	}
 
 	// Scroll diagnostics only: what the header really does in the moments after a slide starts. If something other than
@@ -912,6 +949,10 @@ class NoteMinimapPlugin extends Plugin {
 			const view = this.app.workspace.getActiveViewOfType(MarkdownView);
 			const st = view && this.states.get(view);
 			const sc = st && st.scroller;
+			if (st && st.boundMode === 'preview' && view) {
+				this.prepPreview(view, 600);
+				return;
+			}
 			if (!sc || !sc.isConnected || st.cmBad || st.boundMode === 'preview' || performance.now() < (this._barsMoveUntil || 0)) return;
 			st.peekWait = 0;
 			const y = sc.scrollTop;
@@ -928,10 +969,321 @@ class NoteMinimapPlugin extends Plugin {
 		}
 	}
 
+	// ---- Getting ready while Obsidian starts (Settings > Get ready while Obsidian starts) ----
+	// How Obsidian starts (read from its app.js): it shows the last note you had open in a stand-in view on top of
+	// everything (the loading screen), then loads the plugins, the vault, the cache and the workspace underneath, and
+	// only when workspace.loadLayout() has finished does it take the stand-in away. The plugin's usual warm-ups
+	// (onLayoutReady, a note opening) only start after that, so the first scroll or the first slide of the bars paid
+	// for work that could have been done behind the loading screen. So: while loading, loadLayout is wrapped, and when
+	// it finishes (the real notes are built, still hidden) we do that work first, with a hard time limit, and only then
+	// let Obsidian take the loading screen away. Nothing here changes what is shown; it only moves work earlier.
+	installStartPrep() {
+		if (!this.settings.startPrep || this._prepHook || this._prepDone) return;
+		const ws = this.app.workspace;
+		if (ws.layoutReady === true) {
+			// Switched on later: nothing is hidden behind a loading screen now, so prepare quietly in the background.
+			this._prepTimer = window.setTimeout(() => {
+				this._prepTimer = null;
+				this.startPrep();
+			}, 400);
+			return;
+		}
+		if (typeof ws.loadLayout !== 'function') return;
+		const plugin = this;
+		const orig = ws.loadLayout;
+		this._prepHook = { orig, own: Object.prototype.hasOwnProperty.call(ws, 'loadLayout') };
+		ws.loadLayout = async function (...args) {
+			let out;
+			try {
+				out = await orig.apply(this, args);
+			} finally {
+				plugin.removeStartHook();
+			}
+			try {
+				if (Platform.isMobile) {
+					// The loading screen is still up; wait (at most the time limit, plus a little) for the work.
+					await Promise.race([plugin.startPrep(), new Promise((r) => window.setTimeout(r, 1200))]);
+				} else {
+					plugin.startPrep();
+				}
+			} catch (err) {
+				console.error('My Note Minimap: start-up preparation failed', err);
+			}
+			return out;
+		};
+	}
+
+	removeStartHook() {
+		if (this._prepTimer) clearTimeout(this._prepTimer);
+		this._prepTimer = null;
+		const h = this._prepHook;
+		if (!h) return;
+		this._prepHook = null;
+		try {
+			if (h.own) this.app.workspace.loadLayout = h.orig;
+			else delete this.app.workspace.loadLayout;
+		} catch (e) {}
+	}
+
+	async startPrep() {
+		if (this._prepDone || this._unloaded || !this.settings.startPrep) return;
+		this._prepDone = true;
+		const t0 = performance.now();
+		const stat = (this._pstat = { ms: 0, math: false, code: false, reading: 0, editor: 0, frames: false });
+		const budget = Platform.isMobile ? 900 : 600;
+		const left = () => Math.max(0, budget - (performance.now() - t0));
+		const within = (p, ms) =>
+			Promise.race([Promise.resolve(p).catch(() => {}), new Promise((r) => window.setTimeout(r, Math.max(0, ms)))]);
+		try {
+			// The header and bottom bar get their own graphics layers now, not on the first slide.
+			this.prepBars();
+
+			// Things Obsidian loads the first time a note needs them: maths and code colouring. Only if an open note
+			// has some (a note's text is not known yet: assume it does), so a vault without them pays nothing.
+			const open = this.app.workspace.getLeavesOfType('markdown').map((l) => l.view).filter((v) => v instanceof MarkdownView && v.file);
+			const texts = open.map((v) => (typeof v.data === 'string' ? v.data : null));
+			const anyMath = texts.some((t) => t === null || t.includes('$'));
+			const anyCode = texts.some((t) => t === null || t.includes('```'));
+			const libs = [];
+			if (anyMath && typeof obsidian.loadMathJax === 'function' && typeof obsidian.renderMath === 'function') {
+				libs.push(
+					obsidian
+						.loadMathJax()
+						.then(() => {
+							obsidian.renderMath('f(x)=\\frac{a+b}{c}', true); // builds the typesetter's tables
+							return obsidian.finishRenderMath ? obsidian.finishRenderMath() : null;
+						})
+						.then(() => {
+							stat.math = true;
+						})
+				);
+			}
+			if (anyCode && typeof obsidian.loadPrism === 'function') {
+				libs.push(
+					obsidian.loadPrism().then(() => {
+						stat.code = true;
+					})
+				);
+			}
+
+			// The notes on screen: a reading view is rendered to the end and laid out; an editor draws the stretch below.
+			const jobs = [];
+			let seen = 0;
+			for (const leaf of this.app.workspace.getLeavesOfType('markdown')) {
+				const view = leaf.view;
+				if (!(view instanceof MarkdownView) || !view.file || seen >= 2) continue;
+				seen++;
+				const mode = view.getMode ? view.getMode() : 'source';
+				if (mode === 'preview') {
+					jobs.push(this.prepPreview(view, Math.min(350, left())).then((ok) => (stat.reading += ok ? 1 : 0)));
+				} else {
+					stat.editor += this.prepEditor(view);
+				}
+			}
+			await within(Promise.all(libs.concat(jobs)), left());
+
+			// Let the page lay out and paint once with everything in place before the loading screen goes.
+			const frame = () =>
+				new Promise((r) => {
+					window.requestAnimationFrame(() => r());
+				});
+			await within(frame().then(frame), Math.min(120, left()));
+			stat.frames = true;
+		} catch (err) {
+			console.error('My Note Minimap: start-up preparation stopped', err);
+		}
+		stat.ms = Math.round(performance.now() - t0);
+	}
+
+	// Waits until the reading view has rendered every section (Obsidian does this in slices, which is what later
+	// lands in the middle of a hold), then lays out the part around the screen once.
+	prepPreview(view, ms) {
+		const r = view && view.previewMode && view.previewMode.renderer;
+		if (!r || typeof r.onRendered !== 'function') return Promise.resolve(false);
+		// Obsidian only renders a reading view that is on screen; a hidden one never finishes, so do not wait for it.
+		const pe = r.previewEl;
+		if (!pe || !pe.offsetParent || !(pe.offsetWidth > 0)) return Promise.resolve(false);
+		return new Promise((resolve) => {
+			let done = false;
+			const fin = (ok) => {
+				if (done) return;
+				done = true;
+				try {
+					if (ok && typeof r.updateVirtualDisplay === 'function') r.updateVirtualDisplay();
+				} catch (e) {}
+				resolve(ok);
+			};
+			const timer = window.setTimeout(() => fin(false), Math.max(50, ms));
+			try {
+				r.onRendered(() => {
+					clearTimeout(timer);
+					fin(true);
+				});
+			} catch (e) {
+				clearTimeout(timer);
+				fin(false);
+			}
+		});
+	}
+
+	// The editor draws the stretch just below the screen now (the same thing draw ahead does during a hold).
+	prepEditor(view) {
+		try {
+			const sc = view.contentEl && view.contentEl.querySelector('.cm-scroller');
+			if (!sc || !sc.isConnected || !(sc.clientHeight > 0)) return 0;
+			const st = this.states.get(view) || { view, scroller: sc, peekWait: 0, boundMode: 'source' };
+			if (st.cmBad) return 0;
+			let n = 0;
+			for (let pass = 0; pass < 3; pass++) {
+				st.peekWait = 0;
+				const y = sc.scrollTop;
+				if (!this.drawAhead(st, y, 1, sc.clientHeight)) break;
+				sc.scrollTop = y;
+				n++;
+				if (st.cmBad || st.peekWait >= 30) break;
+			}
+			return n;
+		} catch (err) {
+			return 0;
+		}
+	}
+
+	// Reading view, while an arrow is held. Obsidian draws a reading view in slices: every pass renders at least ten
+	// sections that are not drawn yet (always from the top of the note, whatever is on screen), measures them and
+	// re-plans which sections are attached, and the next pass is queued for the very next frame. During a hold those
+	// passes share every frame with the scroll; on a note with equations a pass can take 100 ms or more, which is the
+	// late frame every 0.2 s seen in the diagnostics (213 passes in one 18 s hold). The passes are held back while
+	// everything from one screen behind to three screens ahead is already drawn, and carried on when the hold ends
+	// (or as soon as the hold reaches a part that is not drawn yet).
+	gateRender(st) {
+		if (st.rgOn || st.rgBad) return;
+		const r = st.view && st.view.previewMode && st.view.previewMode.renderer;
+		if (!r || typeof r.queueRender !== 'function' || !Array.isArray(r.sections)) {
+			st.rgBad = true;
+			return;
+		}
+		const orig = r.queueRender;
+		const own = Object.prototype.hasOwnProperty.call(r, 'queueRender');
+		const plugin = this;
+		r.queueRender = function (...args) {
+			try {
+				if (!plugin.renderNeeded(r)) {
+					st.rgPending = true;
+					if (st.diag) st.diag.rgN++;
+					return;
+				}
+			} catch (err) {
+				st.rgBad = true;
+			}
+			return orig.apply(this, args);
+		};
+		st.rgOn = { r, orig, own };
+	}
+
+	ungateRender(st, quick) {
+		const g = st.rgOn;
+		if (!g) return;
+		st.rgOn = null;
+		try {
+			if (g.own) g.r.queueRender = g.orig;
+			else delete g.r.queueRender;
+		} catch (e) {}
+		if (st.rgPending && !quick) {
+			st.rgPending = false;
+			// Carry on drawing the rest of the note once the hold is over and the bars have had their moment.
+			window.setTimeout(() => {
+				if (this._unloaded) return;
+				if (st.rgOn || st.running || st.hold) {
+					st.rgPending = true; // another hold began: carry on when that one ends
+					return;
+				}
+				try {
+					g.r.queueRender();
+				} catch (e) {}
+			}, 300);
+		}
+	}
+
+	// True if any section from one screen behind to three screens ahead of the screen is not drawn yet.
+	renderNeeded(r) {
+		const pe = r.previewEl;
+		if (!pe) return true;
+		const secs = r.sections;
+		const top = pe.scrollTop;
+		const vh = pe.clientHeight || 800;
+		const lo = top - vh;
+		const hi = top + vh * 3;
+		let sum = 0;
+		let cnt = 0;
+		for (let i = 0; i < secs.length; i++) {
+			if (secs[i].height > 0) {
+				sum += secs[i].height;
+				cnt++;
+			}
+		}
+		const avg = cnt ? sum / cnt : 100;
+		let y = r.topSpace || 0;
+		for (let i = 0; i < secs.length; i++) {
+			const sec = secs[i];
+			if (!sec.shown) continue;
+			if (y > hi) break;
+			const bottom = y + (sec.height > 0 ? sec.height : avg);
+			if (bottom >= lo && !sec.rendered) return true;
+			y = bottom;
+		}
+		return false;
+	}
+
+	// Scroll diagnostics, reading view: times Obsidian's own re-plans and render passes during a hold, so the report
+	// shows what the late frames are made of. The timers are taken off again on unload.
+	timePlans(st) {
+		const r = st.view && st.view.previewMode && st.view.previewMode.renderer;
+		if (!r || st.vdWrap || typeof r.updateVirtualDisplay !== 'function' || typeof r.onRender !== 'function') return;
+		const wrap = (name, n, ms, worst) => {
+			const orig = r[name];
+			const own = Object.prototype.hasOwnProperty.call(r, name);
+			r[name] = function (...args) {
+				const t = performance.now();
+				try {
+					return orig.apply(this, args);
+				} finally {
+					const d = st.diag;
+					if (d) {
+						const c = performance.now() - t;
+						d[n]++;
+						d[ms] += c;
+						if (c > d[worst]) d[worst] = c;
+					}
+				}
+			};
+			return { name, orig, own };
+		};
+		st.vdWrap = {
+			r,
+			list: [wrap('updateVirtualDisplay', 'vdN', 'vdMs', 'vdWorst'), wrap('onRender', 'rnN', 'rnMs', 'rnWorst')],
+		};
+	}
+
+	untimePlans() {
+		for (const st of this.states.values()) {
+			const w = st.vdWrap;
+			if (!w) continue;
+			st.vdWrap = null;
+			for (const x of w.list) {
+				try {
+					if (x.own) w.r[x.name] = x.orig;
+					else delete w.r[x.name];
+				} catch (e) {}
+			}
+		}
+	}
+
 	loadLine() {
 		const b = this._bstat;
 		if (!this.settings.holdLite || !this._boost || !b) return '';
-		return 'Loading: ' + b.memory + ' from memory' + (b.big ? ', ' + b.big + ' long' : '') + ', ' + b.deferred + ' reading views left for later, ' + b.warmed + ' read ahead, editor drew ahead ' + b.drew + 'x' + (this._boostBad ? ' (switched off)' : '') + '\n';
+		const p = this._pstat;
+		const start = p ? 'Start-up: ready in ' + p.ms + ' ms (maths ' + (p.math ? 'yes' : 'no') + ', code ' + (p.code ? 'yes' : 'no') + ', ' + p.reading + ' reading view, editor drew ' + p.editor + 'x)\n' : '';
+		return start + 'Loading: ' + b.memory + ' from memory' + (b.big ? ', ' + b.big + ' long' : '') + ', ' + b.deferred + ' reading views left for later, ' + b.warmed + ' read ahead, editor drew ahead ' + b.drew + 'x' + (this._boostBad ? ' (switched off)' : '') + '\n';
 	}
 
 	// The "lighter screen" half of the hold setting (the other half is drawAhead). While an arrow is held, the whole
@@ -944,17 +1296,39 @@ class NoteMinimapPlugin extends Plugin {
 		document.body.addClass('nm-hold-lite');
 	}
 
-	liteOff() {
+	// The blur comes back only once the bars have finished sliding. It used to come back the moment the note stopped,
+	// which is exactly when the bars start to slide back in: two big blurred layers fading and moving over a page that
+	// has to blur what is behind them on every frame, which showed as a stutter as the bars appeared. If the bars are
+	// still away or moving, look again a little later (never while another hold is running).
+	liteOff(force) {
 		if (!this._lite) return;
+		if (!force && this.settings.animateBars && this.barsBusy()) {
+			if (!this._liteT) {
+				this._liteT = setTimeout(() => {
+					this._liteT = null;
+					for (const st of this.states.values()) if (st.running || st.hold) return; // a new hold has the screen lightened again
+					this.liteOff();
+				}, 120);
+			}
+			return;
+		}
 		this._lite = false;
 		document.body.removeClass('nm-hold-lite');
 	}
 
 	releaseBars() {
-		this.liteOff();
+		if (this._liteT) clearTimeout(this._liteT);
+		this._liteT = null;
+		if (this._barsOffT) clearTimeout(this._barsOffT);
+		this._barsOffT = null;
+		this.liteOff(true);
 		this.setBars(false);
 		this._barsCls = false;
-		document.body.removeClass('nm-animate-bars');
+		const b = document.body;
+		b.removeClass('nm-animate-bars');
+		b.removeClass('nm-bars-slide-only');
+		b.removeClass('nm-bars-fade-only');
+		b.style.removeProperty('--nm-bars-ms');
 	}
 
 	// Puts the header and bottom bar on their own layers ahead of time. Doing it on the first frame of the
@@ -962,7 +1336,24 @@ class NoteMinimapPlugin extends Plugin {
 	prepBars() {
 		if (!this.settings.animateBars || this._barsCls) return;
 		this._barsCls = true;
+		this.applyBarsLook();
 		document.body.addClass('nm-animate-bars');
+	}
+
+	// The setting was switched on or off, or its speed / style changed.
+	refreshBarsSetting() {
+		if (this.settings.animateBars) {
+			if (this._barsCls) this.applyBarsLook();
+			else this.prepBars();
+			return;
+		}
+		// Off: let the bars slide back first, then drop the classes (dropping them mid-slide would make the bars jump).
+		this.setBars(false);
+		if (this._barsOffT) clearTimeout(this._barsOffT);
+		this._barsOffT = setTimeout(() => {
+			this._barsOffT = null;
+			if (!this.settings.animateBars && !this._unloaded) this.releaseBars();
+		}, this.barsMs() + 150);
 	}
 
 	// Called every frame the engine moves the note. Down hides, up (or the very top) shows.
@@ -1172,7 +1563,38 @@ class NoteMinimapPlugin extends Plugin {
 		this.buttons.clear();
 	}
 
+	// First run only, once the refresh-rate pop-up has closed: open Obsidian's own settings on the Mobile page and
+	// turn the pull-down Quick Action off, so a pull from the top of the screen no longer opens a menu while the
+	// strip and the bars are being used. Obsidian has no public call for this, so every step is guarded: if one is
+	// missing in some version, that step is skipped and the plugin carries on.
+	async quietQuickAction() {
+		if (!Platform.isMobile || this._unloaded) return;
+		const app = this.app;
+		const setting = app.setting;
+		try {
+			if (setting && typeof setting.open === 'function') {
+				setting.open();
+				if (typeof setting.openTabById === 'function') setting.openTabById('mobile');
+			}
+		} catch (e) {
+			// the settings page could not be opened; the value below is still set
+		}
+		// Give the page a moment to draw, so the change is seen being made.
+		await new Promise((resolve) => window.setTimeout(resolve, 450));
+		if (this._unloaded) return;
+		try {
+			if (app.vault && typeof app.vault.setConfig === 'function') app.vault.setConfig(QUICK_ACTION_KEY, QUICK_ACTION_OFF);
+			// Draw the Mobile page again so it shows the new value.
+			const tab = setting && setting.activeTab;
+			if (tab && typeof tab.display === 'function') tab.display();
+			new Notice('Quick Action set to None.');
+		} catch (e) {
+			// leave it as it was
+		}
+	}
+
 	async saveSettings() {
+		if (this.settings.animateBars && this._barsCls) this.applyBarsLook(); // speed / style of the bars' slide (also after a reset)
 		this.queueFrameRefresh();
 		this.saveDirty = true;
 		this.saveSoon();
@@ -1723,6 +2145,56 @@ class NoteMinimapPlugin extends Plugin {
 		return (Math.max(1, Math.round((v * st.period) / unit)) * unit) / st.period;
 	}
 
+	// A "ruler" for the hold: where a line near the top of the screen sits in the note (its distance from the top of
+	// the scrolled content, which only changes when the layout above it changes). It is the same line the editor
+	// itself keeps steady when it re-measures (the one 8 px below the top), picked again as it scrolls off the top.
+	// Reads only, no writes. readAnchor gives the ruler's place now (NaN when there is none: reading view, nothing
+	// drawn near the top, an editor that does not offer what is needed) and how far below the top it is (st.ancRel);
+	// pickAnchor chooses a fresh ruler line.
+	readAnchor(st, obs) {
+		st.ancRel = -1e9;
+		const el = st.anc;
+		if (!(this.settings.holdGuard || this.settings.holdLite)) return NaN;
+		if (st.ancBad || st.cmBad || st.boundMode === 'preview' || !el || !el.isConnected) return NaN;
+		try {
+			const rel = el.getBoundingClientRect().top - st.scroller.getBoundingClientRect().top;
+			st.ancRel = rel;
+			return rel + obs;
+		} catch (err) {
+			st.ancBad = true;
+			st.anc = null;
+			return NaN;
+		}
+	}
+
+	pickAnchor(st, obs, ch) {
+		if (!(this.settings.holdGuard || this.settings.holdLite)) return NaN;
+		if (st.ancBad || st.cmBad || st.boundMode === 'preview') return NaN;
+		try {
+			const cm = st.view && st.view.editor && st.view.editor.cm;
+			if (!cm || typeof cm.lineBlockAtHeight !== 'function' || typeof cm.domAtPos !== 'function') {
+				st.ancBad = true;
+				return NaN;
+			}
+			const pad = cm.documentPadding ? cm.documentPadding.top : 0;
+			const blk = cm.lineBlockAtHeight(Math.max(0, obs - pad) + 8);
+			const at = cm.domAtPos(blk.from);
+			let n = at && at.node;
+			if (n && n.nodeType !== 1) n = n.parentElement;
+			const line = n && n.closest ? n.closest('.cm-line') : null;
+			if (!line) return NaN; // a block drawn by a widget (a table, say): the old ruler stays until there is a line
+			const rel = line.getBoundingClientRect().top - st.scroller.getBoundingClientRect().top;
+			if (!(rel > -3000 && rel < ch)) return NaN;
+			st.anc = line;
+			st.ancRel = rel;
+			return rel + obs;
+		} catch (err) {
+			st.ancBad = true;
+			st.anc = null;
+			return NaN;
+		}
+	}
+
 	cruiseTick(st, rawDt, steadyDt, t0) {
 		const sc = st.scroller;
 		const dpr = window.devicePixelRatio || 1;
@@ -1743,6 +2215,8 @@ class NoteMinimapPlugin extends Plugin {
 			m = st.mx = { sh, ch, mapH: st.el.clientHeight, t: mxNow };
 		}
 		const max = Math.max(0, sh - ch);
+		// Where a line near the top of the screen sits in the note, to tell a real layout shift from a stray nudge.
+		const ya = this.readAnchor(st, obs);
 		if (st.diag) {
 			// How long the reads took: if the page's layout was out of date, the first read pays for all of it.
 			const r = performance.now() - t0;
@@ -1762,16 +2236,47 @@ class NoteMinimapPlugin extends Plugin {
 			}
 		}
 
-		// ---- somebody else moved the note (or the end clamped our write): follow, never fight ----
+		// ---- somebody else moved the note (or the end clamped our write): follow what is real, never fight it ----
+		// The editor re-measures lines as they are drawn and moves the scroll position to keep the text steady, and
+		// that is a move to follow. But a move that the text did not make with it (the scroll position went back
+		// while the lines above stayed where they were) is a visible jump, and following it keeps the jump. With a
+		// line near the top of the screen as a ruler we can tell the two apart: how far that line moved in the note
+		// (l) is how far the note really shifted. If the scroll position moved by the same, follow it as before. If
+		// not, go by the ruler: a stray nudge is dropped (our own write puts the note back where it was going), and
+		// a shift the editor did not make up for is made up for here. Without a ruler (reading view, nothing drawn
+		// near the top) it is the old behaviour.
+		let l = NaN;
+		if (ya === ya && st.ancY !== null) {
+			l = ya - st.ancY;
+			if (Math.abs(l) < 0.6) l = 0;
+			else if (Math.abs(l) > 600) l = NaN; // not a shift of the lines: the ruler itself changed
+		}
+		// A fresh ruler line once the old one has scrolled off the top (or is gone). Picked now, before anything is
+		// written, so what is read here is the layout the frame starts from.
+		if (!(st.ancRel > -20)) {
+			const yn = this.pickAnchor(st, obs, ch);
+			st.ancY = yn === yn ? yn : ya === ya ? ya : null;
+		} else {
+			st.ancY = ya;
+		}
 		if (st.lastWrite !== null) {
 			const d = obs - st.lastWrite;
-			if (Math.abs(d) > 1) {
-				st.pos += d;
-				st.holdGoal += d;
-				st.barLast += d;
+			let move = d;
+			if (l === l && Math.abs(d - l) > 1.5) {
+				// The note moved by something other than what the lines did. Counted even when "Hold back jumps" is off.
+				if (this.settings.holdGuard) move = l;
+				if (st.diag) {
+					st.diag.jumps++;
+					st.diag.jumpPx += Math.abs(d - l);
+				}
+			}
+			if (Math.abs(move) > 1) {
+				st.pos += move;
+				st.holdGoal += move;
+				st.barLast += move;
 				if (st.diag) {
 					st.diag.nudges++;
-					st.diag.nudgePx += Math.abs(d);
+					st.diag.nudgePx += Math.abs(move);
 				}
 			}
 		}
@@ -1835,6 +2340,10 @@ class NoteMinimapPlugin extends Plugin {
 		if (peeked || snapped !== st.lastWrite) sc.scrollTop = snapped;
 		st.lastWrite = snapped;
 
+		if (st.boundMode === 'preview') {
+			if (st.diag) this.timePlans(st);
+			if (this.settings.holdLite && !this._boostBad) this.gateRender(st);
+		}
 		this.updateViewport(st, pos);
 		this.trackBars(st, pos);
 		if (st.diag) {
@@ -1883,7 +2392,23 @@ class NoteMinimapPlugin extends Plugin {
 			sc.scrollTop = snapped + dir * Math.max(40, Math.min(420, ahead + 30));
 			const set = sc.scrollTop;
 			cm.measure();
-			st.peekComp = sc.scrollTop - set;
+			// How far the note shifted under us while the editor drew. The editor keeps the line at the top of the
+			// PEEKED position steady, and that line is not the one at the top of the real screen: a block on screen
+			// that changed height counted in full and moved the real screen by that much when the position was put
+			// back. So measure the shift of the ruler line at the top of the real screen instead (and fall back to
+			// the editor's own correction if there is no ruler).
+			let comp = sc.scrollTop - set;
+			const el = st.anc;
+			if (el && el.isConnected && st.ancY !== null) {
+				const y2 = el.getBoundingClientRect().top - sc.getBoundingClientRect().top + sc.scrollTop;
+				if (y2 === y2) {
+					comp = Math.abs(y2 - st.ancY) < 0.6 ? 0 : y2 - st.ancY;
+					st.ancY = y2;
+				}
+			} else {
+				st.ancY = null; // the ruler went with the redraw: pick another next frame
+			}
+			st.peekComp = comp;
 			const redrew = (dir > 0 ? cm.viewport.to : cm.viewport.from) !== from;
 			if (!redrew) st.peekWait = 30; // the editor had nothing to draw; do not keep asking
 			if (st.diag) {
@@ -2005,6 +2530,8 @@ class NoteMinimapPlugin extends Plugin {
 		const ms = (n) => (Math.round(n * 10) / 10).toString();
 		const msg =
 			this.repeatLine(d.lateAt, ms) +
+			(d.rnN || d.rgN ? 'Reading view render passes: ' + d.rnN + ', avg ' + ms(d.rnN ? d.rnMs / d.rnN : 0) + ' ms, worst ' + ms(d.rnWorst) + ' ms; held back: ' + d.rgN + '\n' : '') +
+			(d.vdN ? 'Reading view re-plans: ' + d.vdN + ', avg ' + ms(d.vdMs / d.vdN) + ' ms, worst ' + ms(d.vdWorst) + ' ms\n' : '') +
 			(this.settings.holdLite ? 'Draw ahead: ' + d.peeks + ' tries, editor drew on ' + d.redrew + ' (worst ' + ms(d.peekWorst) + ' ms)' + (st.cmBad ? ', then switched off' : '') + '\n' : '') +
 			(this._barsProbe ? 'Bars ' + (this._barsProbe.hidden ? 'away' : 'back') + ' (header transform/opacity): ' + (this._barsProbe.s.join(', ') || 'no samples') + '\nHeader classes: ' + (this._barsProbe.cls || '-').slice(0, 80) + (this._barsProbe.style ? ' | inline: ' + this._barsProbe.style.slice(0, 80) : '') + '\n' : '') +
 			this.loadLine() +
@@ -2013,6 +2540,7 @@ class NoteMinimapPlugin extends Plugin {
 			'Late frames: ' + d.late + ' of ' + d.frames + (d.late ? ' (plugin ' + d.lateOurs + ', note or screen ' + d.lateOther + ')' : '') + '\n' +
 			'Our work: ' + ms(d.work / d.frames) + ' ms per frame, worst ' + ms(d.workWorst) + ' ms at ' + ms(d.workAt) + ' s into the hold (reads ' + ms(d.readWorst) + ' ms at ' + ms(d.readAt) + ' s)\n' +
 			'Nudges from the note: ' + d.nudges + (d.nudges ? ' (avg ' + ms(d.nudgePx / d.nudges) + ' px)' : '') + '\n' +
+			(this.settings.holdGuard ? 'Jumps held back: ' : 'Jumps seen (not held back): ') + d.jumps + (d.jumps ? ' (avg ' + ms(d.jumpPx / d.jumps) + ' px)' : '') + (st.ancBad ? ' (no ruler line in this note)' : '') + '\n' +
 			'Frame rate: ' + (st.period ? Math.round(1 / st.period) + ' Hz' : '?') + (this.settings.refreshRate ? ' (set to ' + this.settings.refreshRate + ' Hz)' : ' (automatic)') +
 			', step grid: ' + (st.unit === 1 ? 'whole pixels' : 'device pixels');
 		new Notice(msg, 9000);
@@ -2038,6 +2566,7 @@ class NoteMinimapPlugin extends Plugin {
 
 	engineStop(st) {
 		this.liteOff();
+		this.ungateRender(st);
 		if (st.raf) cancelAnimationFrame(st.raf);
 		st.raf = 0;
 		st.running = false;
@@ -2085,7 +2614,7 @@ class NoteMinimapPlugin extends Plugin {
 		if (!sc) return;
 		const step = this.settings.stepSize * dir;
 		st.diag = this.settings.diagnostics
-			? { frames: 0, sum: 0, late: 0, lateOurs: 0, lateOther: 0, prevWork: 0, worst: 0, work: 0, workWorst: 0, nudges: 0, nudgePx: 0, recaptured: 0, why: '', ms: 0, readWorst: 0, readAt: 0, workAt: 0, lateAt: [], peeks: 0, redrew: 0, peekMs: 0, peekWorst: 0 }
+			? { frames: 0, sum: 0, late: 0, lateOurs: 0, lateOther: 0, prevWork: 0, worst: 0, work: 0, workWorst: 0, nudges: 0, nudgePx: 0, jumps: 0, jumpPx: 0, recaptured: 0, why: '', ms: 0, readWorst: 0, readAt: 0, workAt: 0, lateAt: [], peeks: 0, redrew: 0, peekMs: 0, peekWorst: 0, vdN: 0, vdMs: 0, vdWorst: 0, rnN: 0, rnMs: 0, rnWorst: 0, rgN: 0 }
 			: null;
 		this._barsProbe = null; // the diagnostics line about the bars is per hold
 		if (st.pressTimer) clearTimeout(st.pressTimer);
@@ -2093,6 +2622,10 @@ class NoteMinimapPlugin extends Plugin {
 		st.pressT = performance.now();
 		st.holdOn = false;
 		st.peekWait = 0; // draw ahead may look from the first frame of every hold
+		st.anc = null; // the ruler line is picked again at the first frame
+		st.ancY = null;
+		st.ancBad = false;
+		st.ancRel = -1e9;
 		if (st.el) {
 			st.el.removeClass('nm-press-up', 'nm-press-down', 'nm-holding');
 			st.el.addClass(dir < 0 ? 'nm-press-up' : 'nm-press-down');
@@ -2623,10 +3156,11 @@ class NoteMinimapPlugin extends Plugin {
 }
 
 class RefreshRateModal extends Modal {
-	constructor(app, plugin, onDone) {
+	constructor(app, plugin, onDone, firstRun) {
 		super(app);
 		this.plugin = plugin;
 		this.onDone = onDone;
+		this.firstRun = !!firstRun; // true only for the pop-up that appears by itself the first time
 		this.stop = null;
 	}
 
@@ -2780,6 +3314,11 @@ class RefreshRateModal extends Modal {
 			await this.plugin.saveSettings();
 		}
 		if (this.onDone) this.onDone();
+		// The first-run pop-up also takes the person to Obsidian's Mobile settings and turns the Quick Action off.
+		if (this.firstRun) {
+			this.firstRun = false;
+			this.plugin.quietQuickAction();
+		}
 	}
 }
 
@@ -3038,6 +3577,48 @@ class MinimapSettingTab extends PluginSettingTab {
 		}
 
 		new Setting(containerEl)
+			.setName('Animate top and bottom bars')
+			.setDesc('Slide and fade the header and the bottom bar out of the way while you scroll, and bring them back when you stop. Holding an arrow hides them; Obsidian\'s own hide-on-scroll gets the same smooth slide.')
+			.addToggle((t) =>
+				t.setValue(p.settings.animateBars).onChange(async (v) => {
+					p.settings.animateBars = v;
+					await p.saveSettings();
+					p.refreshBarsSetting();
+					this.display();
+				})
+			);
+
+		if (p.settings.animateBars) {
+			new Setting(containerEl)
+				.setName('Bar animation')
+				.setDesc('How the bars leave and come back.')
+				.addDropdown((d) =>
+					d
+						.addOption('slide-fade', 'Slide and fade')
+						.addOption('slide', 'Slide only')
+						.addOption('fade', 'Fade only')
+						.setValue(p.settings.barsStyle || 'slide-fade')
+						.onChange(async (v) => {
+							p.settings.barsStyle = v;
+							await p.saveSettings();
+							p.applyBarsLook();
+						})
+				);
+			slider('Bar animation speed', 'How long the bars take to move, in milliseconds. Lower is quicker.', 'barsMs', 150, 900, 10, () => p.applyBarsLook());
+		}
+
+		new Setting(containerEl)
+			.setName('Get ready while Obsidian starts')
+			.setDesc('Does the first-time work while Obsidian is still opening, so the first scroll is smooth. Takes effect next time Obsidian starts.')
+			.addToggle((t) =>
+				t.setValue(p.settings.startPrep).onChange(async (v) => {
+					p.settings.startPrep = v;
+					if (!v) p.removeStartHook();
+					await p.saveSettings();
+				})
+			);
+
+		new Setting(containerEl)
 			.setName('Faster loading and smoother holding')
 			.setDesc('Opens notes faster and makes holding an arrow smoother on long or heavy notes.')
 			.addToggle((t) =>
@@ -3055,6 +3636,16 @@ class MinimapSettingTab extends PluginSettingTab {
 						st.cmBad = false;
 						st.peekWait = 0;
 					}
+					await p.saveSettings();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName('Hold back jumps')
+			.setDesc('While you hold an arrow, if the editor suddenly shifts the note by more than the text moved, put it back instead of keeping the jump. Turn off if holding feels worse.')
+			.addToggle((t) =>
+				t.setValue(p.settings.holdGuard !== false).onChange(async (v) => {
+					p.settings.holdGuard = v;
 					await p.saveSettings();
 				})
 			);
