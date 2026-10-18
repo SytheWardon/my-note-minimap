@@ -17,6 +17,11 @@ const PAGE_MIN = 40;
 const UPDATE_REPO = 'SytheWardon/my-note-minimap';
 const UPDATE_EVERY_MS = 24 * 60 * 60 * 1000; // the automatic check runs at most once a day
 
+// The version of this code. It travels inside main.js, so it is always the version that is actually running (Obsidian
+// only reads manifest.json at start-up, and reading it from disk ourselves caused a hitch). Keep it equal to the
+// version in manifest.json; the release workflow refuses to publish if they differ.
+const PLUGIN_VERSION = '4.5.4';
+
 // 1 if version a is newer than b, -1 if older, 0 if the same ("1.2.3" style, a leading "v" is ignored).
 function cmpVer(a, b) {
 	const pa = String(a).replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0);
@@ -689,26 +694,13 @@ class NoteMinimapPlugin extends Plugin {
 	// ---- Updates ----
 	// Looks at the latest GitHub release. Returns 'available', 'current' or 'error' and leaves the details in
 	// this._updState / this._update / this._updMsg for the settings page to show.
-	// The version that is really installed. Obsidian reads manifest.json once, when it starts, so this.manifest can
-	// still show the old number after an update has been written to disk. The file on disk is the truth.
-	async readDiskVersion() {
-		try {
-			const ad = this.app.vault.adapter;
-			const man = JSON.parse(await ad.read(this.manifest.dir + '/manifest.json'));
-			if (man && man.id === this.manifest.id && /^\d+\.\d+\.\d+/.test(String(man.version))) this._diskVersion = String(man.version);
-		} catch (e) {
-			// keep what Obsidian reported
-		}
-		return this.installedVersion();
-	}
-
+	// The version of the code that is running right now. It is a constant inside main.js, so nothing is read from disk.
 	installedVersion() {
-		return this._diskVersion || this.manifest.version;
+		return PLUGIN_VERSION;
 	}
 
 	async checkForUpdate() {
 		if (this._updBusy) return this._updState;
-		await this.readDiskVersion();
 		this._updBusy = true;
 		this._updState = 'checking';
 		this._updMsg = '';
@@ -761,12 +753,12 @@ class NoteMinimapPlugin extends Plugin {
 			}
 			if (man.id !== this.manifest.id || man.version !== u.version) throw new Error('The release files do not match its version.');
 			if (js.length < 1000 || !js.includes('NoteMinimapPlugin')) throw new Error('The downloaded main.js looks incomplete.');
+			if (!js.includes("const PLUGIN_VERSION = '" + u.version + "'")) throw new Error('The downloaded main.js is not version ' + u.version + '.');
 			const ad = this.app.vault.adapter;
 			const dir = this.manifest.dir;
 			await ad.write(dir + '/styles.css', css);
 			await ad.write(dir + '/manifest.json', manifestTxt);
 			await ad.write(dir + '/main.js', js); // last, so the code only changes once everything else is in place
-			this._diskVersion = u.version;
 		} catch (e) {
 			this._updBusy = false;
 			this._updState = 'error';
@@ -4122,7 +4114,6 @@ class MinimapSettingTab extends PluginSettingTab {
 			);
 
 		const updRow = new Setting(containerEl).setName('Version ' + p.installedVersion());
-		p.readDiskVersion().then(() => updRow.setName('Version ' + p.installedVersion()));
 		let updBtn = null;
 		let spinEl = null;
 		let spinTimer = null;

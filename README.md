@@ -239,6 +239,7 @@ Nothing is sent about you or your notes, and nothing else leaves your device. No
 
 ## Version history
 
+- **4.5.4:** Opening the settings tab no longer reads a file from disk (that caused a small hitch). The running version is now built into `main.js`, so *Version* and *Check for updates* always use the version that is really running, including right after an update. No other change.
 - **4.5.3:** The *Version* line under *Updates* now reads the installed `manifest.json` from disk, so it shows the right number right after an update (Obsidian only re-reads it at start-up, so it kept showing the old version, and *Check for updates* kept offering the same update). No other change.
 - **4.5.2:** Version bump only. No change in behaviour.
 - **4.5.1:** Removed the `!important` rules from the stylesheet (the update-check ring now wins by selector specificity). No change in behaviour.
