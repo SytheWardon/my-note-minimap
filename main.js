@@ -20,7 +20,7 @@ const UPDATE_EVERY_MS = 24 * 60 * 60 * 1000; // the automatic check runs at most
 // The version of this code. It travels inside main.js, so it is always the version that is actually running (Obsidian
 // only reads manifest.json at start-up, and reading it from disk ourselves caused a hitch). Keep it equal to the
 // version in manifest.json; the release workflow refuses to publish if they differ.
-const PLUGIN_VERSION = '4.5.4';
+const PLUGIN_VERSION = '4.5.5';
 
 // 1 if version a is newer than b, -1 if older, 0 if the same ("1.2.3" style, a leading "v" is ignored).
 function cmpVer(a, b) {
@@ -759,6 +759,14 @@ class NoteMinimapPlugin extends Plugin {
 			await ad.write(dir + '/styles.css', css);
 			await ad.write(dir + '/manifest.json', manifestTxt);
 			await ad.write(dir + '/main.js', js); // last, so the code only changes once everything else is in place
+			// Obsidian keeps its own copy of every plugin's manifest from start-up and builds its plugin list (and the
+			// reloaded plugin's this.manifest) from it. Hand it the new one so it stops showing the old version.
+			try {
+				const mf = this.app.plugins && this.app.plugins.manifests;
+				if (mf && mf[this.manifest.id]) mf[this.manifest.id] = Object.assign({}, mf[this.manifest.id], man, { dir });
+			} catch (e) {
+				// cosmetic only: a restart refreshes it
+			}
 		} catch (e) {
 			this._updBusy = false;
 			this._updState = 'error';
