@@ -4,9 +4,13 @@ const obsidian = require('obsidian');
 const { Plugin, MarkdownView, PluginSettingTab, Setting, Platform, Notice, Modal, debounce, setIcon } = obsidian;
 
 // Obsidian's own setting for the pull-down Quick Action (Settings > Mobile > Configure mobile Quick Action).
-// 'none' is the value Obsidian stores for "disabled"; kept in one place in case it ever needs to change.
+// Obsidian has no real "off": with nothing assigned, every pull-down shows an "Action not configured" prompt. So the
+// action is set to this plugin's own command, which does nothing; Obsidian counts it as configured and stays quiet.
 const QUICK_ACTION_KEY = 'mobilePullAction';
-const QUICK_ACTION_OFF = 'none';
+const QUICK_ACTION_OFF = 'my-note-minimap:pull-nothing';
+
+// A source line counts as at least this many characters of a page, so blank and short lines still take their place.
+const PAGE_MIN = 40;
 
 const DEFAULTS = {
 	style: 'scrollbar', // 'scrollbar' or 'minimap'
@@ -32,6 +36,8 @@ const DEFAULTS = {
 	holdGuard: true, // while an arrow is held, a sudden jump of the note that the text did not make with it is put back, not kept
 	animateBars: true, // slide/fade the top header and bottom bar while scrolling (with the strip, and Obsidian's own hide-on-scroll)
 	barsMs: 450, // length of that slide, in milliseconds
+	pageBubble: true, // a small circle with the page number pops out of the bar while the note scrolls
+	pageLen: 1800, // how much text is one page, in characters (counted in the note's text, so no screen can change it)
 	barsStyle: 'slide-fade', // 'slide-fade', 'slide' or 'fade'
 	smoothMs: 340, // length of the glide animation
 	diagnostics: false, // after letting go of an arrow, show how smoothly the screen kept up
@@ -393,7 +399,7 @@ class NoteMinimapPlugin extends Plugin {
 		// v9: the hold speed is now one the eye can follow (about 8 degrees of view per second on a phone held at
 		// reading distance). The old default of 800 px/s crossed a whole screen in a second, which blurs.
 		if ((saved.ver || 1) < 9 && saved.holdSpeed === 800) this.settings.holdSpeed = DEFAULTS.holdSpeed;
-		// v10: "Draw ahead while holding" and "Lighter screen while holding" are one setting (holdLite). It stays on if
+		// v10: the two older hold helpers (draw ahead, lighter screen) are one setting (holdLite). It stays on if
 		// either was on; the old key is dropped.
 		if ((saved.ver || 1) < 10) this.settings.holdLite = saved.holdLite !== false || saved.predraw === true;
 		// v11: the default hold speed is 200 px/s, a calmer pace still. The old default of 320 becomes the new one;
@@ -458,6 +464,10 @@ class NoteMinimapPlugin extends Plugin {
 		});
 
 		// Ask for the screen's refresh rate once, on a phone or tablet, as soon as the workspace is up.
+		// Keep the pull-down Quick Action off, quietly, so the "configure" pop-up does not come back on a swipe down.
+		this.addCommand({ id: 'pull-nothing', name: 'Do nothing (pull-down action)', callback: () => {} });
+		this.app.workspace.onLayoutReady(() => this.keepQuickActionOff());
+		this.blockPullDown();
 		this.app.workspace.onLayoutReady(() => {
 			this.prepBars();
 			if (!Platform.isMobile || this.settings.refreshAsked) return;
@@ -470,6 +480,7 @@ class NoteMinimapPlugin extends Plugin {
 		// Settings are written to disk shortly after the last change; make sure none is lost.
 		this.registerDomEvent(document, 'visibilitychange', () => {
 			if (document.visibilityState === 'hidden') this.flushSave();
+			else this.keepQuickActionOff();
 		});
 		// Only a rotation (or a fold / unfold) changes the safe areas, so only that re-measures. Other
 		// resizes, like dragging the window or the on-screen keyboard opening, are followed by each
@@ -479,6 +490,7 @@ class NoteMinimapPlugin extends Plugin {
 		// A rotation makes Obsidian redraw the whole reading view at once; nothing may be held back from it.
 		this.registerDomEvent(window, 'resize', () => {
 			for (const st of this.states.values()) if (st.rgOn) this.ungateRender(st);
+			this._pageQuiet = performance.now() + 700; // the note being laid out again is not a scroll
 		});
 		this.registerDomEvent(window, 'resize', debounce(() => {
 			const key = this.screenKey();
@@ -1377,8 +1389,7 @@ class NoteMinimapPlugin extends Plugin {
 	}
 
 	// Called every frame the engine moves the note. Down hides, up (or the very top) shows.
-	// (Same logic as the earlier 1.4.x releases, whose slide the header and bottom bar animated smoothly with.)
-	trackBars(st, pos) {
+		trackBars(st, pos) {
 		if (!this.settings.animateBars) return;
 		this.prepBars();
 		const d = pos - st.barLast;
@@ -1607,7 +1618,81 @@ class NoteMinimapPlugin extends Plugin {
 			// Draw the Mobile page again so it shows the new value.
 			const tab = setting && setting.activeTab;
 			if (tab && typeof tab.display === 'function') tab.display();
-			new Notice('Quick Action set to None.');
+			new Notice('Pull-down Quick Action set to do nothing.');
+		} catch (e) {
+			// leave it as it was
+		}
+	}
+
+	// Obsidian shows a label at the top of the screen while you pull down ("Configure pull action", or the name of the
+	// assigned command) and, on letting go, an "Action not configured" bar. Nothing here can turn those off, so they
+	// are hidden the moment they exist. To stay cheap, the page is only watched while a finger is down (plus a
+	// moment after), and only small pieces of text are looked at.
+	blockPullDown() {
+		if (!Platform.isMobile) return;
+		const RE = /Action not configured|Configure pull action|Do nothing \(pull-down action\)/;
+		const hideIfPrompt = (n) => {
+			if (!(n instanceof HTMLElement) || n.hasAttribute('data-nm-nopull') || n.closest('.note-minimap, .modal, .vertical-tab-content')) return false;
+			if (n.childElementCount > 8) return false;
+			const t = n.textContent;
+			if (!t || t.length > 140 || !RE.test(t)) return false;
+			// Hide the whole piece, not just the text node's parent: climb while the parent holds nothing more.
+			let el = n;
+			while (el.parentElement && el.parentElement !== document.body && el.parentElement.textContent.length <= t.length + 2) el = el.parentElement;
+			el.setAttribute('data-nm-nopull', '');
+			return true;
+		};
+		const scan = () => {
+			const kids = document.body.children;
+			for (let i = 0; i < kids.length; i++) {
+				hideIfPrompt(kids[i]);
+				const sub = kids[i].children;
+				for (let j = 0; j < sub.length && j < 40; j++) hideIfPrompt(sub[j]);
+			}
+		};
+		const mo = new MutationObserver((list) => {
+			for (const r of list) {
+				if (r.type === 'childList') r.addedNodes.forEach(hideIfPrompt);
+				else if (r.type === 'characterData') hideIfPrompt(r.target.parentElement);
+				else hideIfPrompt(r.target);
+			}
+		});
+		let timer = null;
+		const watch = () => {
+			if (timer) clearTimeout(timer);
+			timer = null;
+			if (!this._pullWatching) {
+				this._pullWatching = true;
+				scan();
+				mo.observe(document.body, { childList: true, subtree: true, characterData: true, attributes: true, attributeFilter: ['class', 'style'] });
+			}
+		};
+		const unwatch = () => {
+			if (timer) clearTimeout(timer);
+			timer = window.setTimeout(() => {
+				timer = null;
+				mo.disconnect();
+				this._pullWatching = false;
+			}, 1500);
+		};
+		this.registerDomEvent(window, 'touchstart', watch, { capture: true, passive: true });
+		this.registerDomEvent(window, 'touchend', unwatch, { capture: true, passive: true });
+		this.registerDomEvent(window, 'touchcancel', unwatch, { capture: true, passive: true });
+		this.register(() => {
+			mo.disconnect();
+			if (timer) clearTimeout(timer);
+		});
+	}
+
+	// After the first run, make sure Obsidian's pull-down Quick Action is still None (it can be reset by an update or a
+	// sync). No settings page, no notice: just the value, and only when it differs.
+	keepQuickActionOff() {
+		if (!Platform.isMobile || this._unloaded || !this.settings.refreshAsked) return;
+		try {
+			const v = this.app.vault;
+			if (v && typeof v.getConfig === 'function' && typeof v.setConfig === 'function' && v.getConfig(QUICK_ACTION_KEY) !== QUICK_ACTION_OFF) {
+				v.setConfig(QUICK_ACTION_KEY, QUICK_ACTION_OFF);
+			}
 		} catch (e) {
 			// leave it as it was
 		}
@@ -1832,8 +1917,11 @@ class NoteMinimapPlugin extends Plugin {
 			st.lastY = e.clientY;
 			el.addClass('note-minimap-dragging');
 			// Grabbing the thumb keeps it under the finger; tapping the track glides there.
-			const onThumb = y >= st.vpTop && y <= st.vpTop + st.vpH;
-			st.grab = sbMode() ? (onThumb ? y - st.vpTop : st.vpH / 2) : 0;
+			// The thumb can be thin on a long note, so a touch near it counts as a grab (at least 56 px tall in all),
+			// and the thumb stays under the finger instead of the note jumping to that spot.
+			const slop = sbMode() ? Math.max(8, (56 - st.vpH) / 2) : 0;
+			const onThumb = y >= st.vpTop - slop && y <= st.vpTop + st.vpH + slop;
+			st.grab = sbMode() ? (onThumb ? Math.max(0, Math.min(st.vpH, y - st.vpTop)) : st.vpH / 2) : 0;
 			st.lead = sbMode() && onThumb;
 			this.prepBars();
 			this.glide(st, targetFor(e), onThumb ? this.dragOmega() : this.glideOmega());
@@ -1917,6 +2005,10 @@ class NoteMinimapPlugin extends Plugin {
 		this.settleBars();
 		this.unbind(st);
 		if (st.ro) st.ro.disconnect();
+		if (st.pageTimer) clearTimeout(st.pageTimer);
+		if (st.pageFadeTimer) clearTimeout(st.pageFadeTimer);
+		if (st.pageClearTimer) clearTimeout(st.pageClearTimer);
+		if (st.pageEl) st.pageEl.remove();
 		st.el.remove();
 		st.host.removeClass('note-minimap-host', 'note-minimap-pad-left', 'note-minimap-pad-right');
 		st.host.style.removeProperty('--nm-width');
@@ -3066,6 +3158,256 @@ class NoteMinimapPlugin extends Plugin {
 	}
 
 	// Writes the thumb's size and position, skipping whatever has not changed since the last write.
+	// ---- Page bubble ----
+	// A small circle pops out beside the thumb while the note scrolls and says which page you are on. Pages are
+	// counted in the note's own text, never in screen heights, so turning the phone or unfolding it cannot change
+	// them: every source line counts as its length (at least PAGE_MIN, so blank and short lines still take their
+	// place), and one page is `pageLen` of that. The page you are on is the one holding the line at the top of the
+	// screen; the editor and the reading view are each asked for that line in their own way (Obsidian's reading view
+	// keeps the first and last line of every section, the editor can say which line sits at a given height).
+	pageModel(st, view, mode) {
+		let key;
+		let build;
+		if (mode === 'preview') {
+			key = typeof view.data === 'string' ? view.data : '';
+			build = () => {
+				const n = key.length;
+				const cum = [0];
+				let i = 0;
+				while (i <= n) {
+					let j = key.indexOf('\n', i);
+					if (j < 0) j = n;
+					cum.push(cum[cum.length - 1] + Math.max(PAGE_MIN, j - i + 1));
+					i = j + 1;
+				}
+				return cum;
+			};
+		} else {
+			const cm = view.editor && view.editor.cm;
+			if (!cm || !cm.state) return null;
+			const doc = cm.state.doc;
+			key = doc;
+			build = () => {
+				const cum = [0];
+				if (typeof doc.iterLines === 'function') {
+					for (const ln of doc.iterLines()) cum.push(cum[cum.length - 1] + Math.max(PAGE_MIN, ln.length + 1));
+				} else {
+					for (let i = 1; i <= doc.lines; i++) cum.push(cum[cum.length - 1] + Math.max(PAGE_MIN, doc.line(i).length + 1));
+				}
+				return cum;
+			};
+		}
+		const m = st.pm;
+		if (m && m.key === key && m.mode === mode) return m.cum;
+		const cum = build();
+		st.pm = { key, mode, cum };
+		return cum;
+	}
+
+	// The source line (a fraction, in the reading view) at the top of the screen.
+	pageTopLine(st, view, mode, sc) {
+		if (mode === 'preview') {
+			const r = view.previewMode && view.previewMode.renderer;
+			const secs = r && r.sections;
+			if (!Array.isArray(secs) || !secs.length) return 0;
+			// Same walk Obsidian uses to place its sections (getSectionTop): heights not measured yet are guessed.
+			const y = sc.scrollTop;
+			let acc = 0;
+			let best = null;
+			let bestTop = 0;
+			for (let i = 0; i < secs.length; i++) {
+				const sec = secs[i];
+				if (acc > y) break;
+				best = sec;
+				bestTop = acc;
+				let h = sec.height;
+				if (!sec.computed && h === 0 && i > 0) h = acc / i;
+				if (!sec.shown) h = 0;
+				acc += h;
+			}
+			if (!best || !best.start) return 0;
+			const f = best.height > 0 ? Math.min(1, Math.max(0, (y - bestTop) / best.height)) : 0;
+			return best.start.line + f * Math.max(0, (best.lines || 0) - 1);
+		}
+		const cm = view.editor && view.editor.cm;
+		const pad = cm.documentPadding ? cm.documentPadding.top : 0;
+		const blk = cm.lineBlockAtHeight(Math.max(0, sc.scrollTop - pad));
+		return cm.state.doc.lineAt(blk.from).number - 1;
+	}
+
+	pageInfo(st) {
+		try {
+			const view = st.view;
+			const sc = st.scroller;
+			if (!view || !sc) return null;
+			const mode = st.boundMode === 'preview' ? 'preview' : 'source';
+			const cum = this.pageModel(st, view, mode);
+			if (!cum || cum.length < 2) return null;
+			const lines = cum.length - 1;
+			const line = Math.max(0, Math.min(lines - 1, Math.floor(this.pageTopLine(st, view, mode, sc))));
+			const per = Math.max(300, this.settings.pageLen || 1800);
+			const total = Math.max(1, Math.ceil(cum[lines] / per));
+			let page = Math.floor(cum[line] / per) + 1;
+			if (sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 2) page = total; // the very end is the last page
+			return { page: Math.max(1, Math.min(total, page)), total };
+		} catch (err) {
+			return null;
+		}
+	}
+
+	// Called every time the thumb is placed. A change of position of more than a pixel or two is a scroll.
+	pageTick(st, vpTop, vpH) {
+		if (!this.settings.pageBubble || st.dead) return;
+		const y = st.pageY;
+		if (y === undefined) return;
+		const now = performance.now();
+		const file = st.view && st.view.file;
+		if (st.pageFile !== file) {
+			// Another note: no bubble for the jump back to where it was left.
+			st.pageFile = file;
+			st.pageSeen = y;
+			st.pageQuiet = now + 900;
+			return;
+		}
+		if (st.pageSeen === undefined) {
+			st.pageSeen = y;
+			return;
+		}
+		if (Math.abs(y - st.pageSeen) >= 2) {
+			st.pageSeen = y;
+			if (!st.noScroll && now > (st.pageQuiet || 0) && now > (this._pageQuiet || 0)) {
+				st.pageLastMove = now;
+				if (st.pageFading) this.pageKeep(st);
+				else if (!st.pageOn) this.pageShow(st, vpTop, vpH);
+			}
+		}
+		if (st.pageOn) this.pageMove(st, vpTop, vpH, now, false);
+	}
+
+	pageShow(st, vpTop, vpH) {
+		const info = this.pageInfo(st);
+		if (!info) return;
+		if (st.pageClearTimer) clearTimeout(st.pageClearTimer);
+		st.pageClearTimer = null;
+		if (st.pageEl) st.pageEl.removeClass('nm-page-fade');
+		if (!st.pageEl) {
+			const el = st.host.createDiv({ cls: 'nm-page' });
+			const b = el.createDiv({ cls: 'nm-page-b' });
+			st.pageNum = b.createSpan({ cls: 'nm-page-n' });
+			st.pageOf = b.createSpan({ cls: 'nm-page-of' });
+			st.pageEl = el;
+		}
+		// Where it sits: beside the thumb, on the side the bar is on (measured once per appearance).
+		const hr = st.host.getBoundingClientRect();
+		const tr = st.vpEl.getBoundingClientRect();
+		const sr = st.el.getBoundingClientRect();
+		const right = !st.el.hasClass('note-minimap-left');
+		const size = 38; // height of the pill
+		const gap = 10;
+		const e = st.pageEl.style;
+		if (right) {
+			e.left = 'auto';
+			e.right = Math.round(hr.right - tr.left + gap) + 'px';
+		} else {
+			e.right = 'auto';
+			e.left = Math.round(tr.right - hr.left + gap) + 'px';
+		}
+		e.setProperty('--nm-page-from', (right ? 1 : -1) * 30 + 'px'); // it starts at the bar and grows out of it
+		e.setProperty('--nm-page-origin', right ? 'right center' : 'left center');
+		e.setProperty('--nm-page-idle-op', st.el.style.getPropertyValue('--nm-thumb-opacity') || '0.75');
+		const bg = st.el.style.getPropertyValue('--nm-thumb-color') || 'var(--text-accent)';
+		let fg = 'var(--text-on-accent)';
+		if (/^#[0-9a-f]{6}$/i.test(bg)) {
+			const n = parseInt(bg.slice(1), 16);
+			fg = 0.299 * ((n >> 16) & 255) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255) > 150 ? '#000' : '#fff';
+		}
+		e.setProperty('--nm-page-bg', bg);
+		e.setProperty('--nm-page-fg', fg);
+		st.pageOff = sr.top - hr.top;
+		st.pageHostH = hr.height;
+		st.pageSize = size;
+		st.pageTxt = null;
+		st.pageTot = null;
+		st.pageY0 = null;
+		this.pageSet(st, info, false);
+		this.pageMove(st, vpTop, vpH, performance.now(), true);
+		void st.pageEl.offsetWidth; // so the pop starts from its resting place
+		st.pageEl.addClass('nm-page-on');
+		st.pageOn = true;
+		this.pageArm(st, 800);
+	}
+
+	// Checks that the note has stopped, then hides the circle. Stays while a finger is on the bar or an arrow is held.
+	pageArm(st, ms) {
+		if (st.pageTimer) clearTimeout(st.pageTimer);
+		st.pageTimer = window.setTimeout(() => {
+			st.pageTimer = null;
+			if (!st.pageOn || st.dead || st.pageFading) return;
+			const idle = performance.now() - st.pageLastMove;
+			if (st.dragging || st.hold || st.cruise || idle < 800) this.pageArm(st, Math.max(120, 800 - idle));
+			else this.pageHide(st);
+		}, ms);
+	}
+
+	// Two steps: the circle first settles into the colour the bar has when it is not being used, then slips away.
+	pageHide(st) {
+		if (!st.pageOn || st.pageFading || !st.pageEl) return;
+		st.pageFading = true;
+		st.pageEl.addClass('nm-page-fade');
+		st.pageFadeTimer = window.setTimeout(() => {
+			st.pageFadeTimer = null;
+			st.pageFading = false;
+			st.pageOn = false;
+			if (!st.pageEl) return;
+			st.pageEl.removeClass('nm-page-on');
+			st.pageClearTimer = window.setTimeout(() => {
+				st.pageClearTimer = null;
+				if (st.pageEl && !st.pageOn) st.pageEl.removeClass('nm-page-fade');
+			}, 260);
+		}, 470); // the colour settle and the shrink play together (0.46 s)
+	}
+
+	// The note moved again while the circle was settling: back to full colour, and the countdown starts over.
+	pageKeep(st) {
+		if (!st.pageFading) return;
+		if (st.pageFadeTimer) clearTimeout(st.pageFadeTimer);
+		st.pageFadeTimer = null;
+		st.pageFading = false;
+		if (st.pageEl) st.pageEl.removeClass('nm-page-fade');
+		this.pageArm(st, 800);
+	}
+
+	pageMove(st, vpTop, vpH, now, fresh) {
+		if (!fresh && now - (st.pageCalcT || 0) > 70) {
+			st.pageCalcT = now;
+			const info = this.pageInfo(st);
+			if (info) this.pageSet(st, info, true);
+		}
+		const room = Math.max(0, (st.pageHostH || 0) - st.pageSize - 4);
+		const y = Math.round(Math.max(0, Math.min(room, st.pageOff + vpTop + vpH / 2 - st.pageSize / 2)));
+		if (st.pageY0 !== y) {
+			st.pageY0 = y;
+			st.pageEl.style.transform = 'translate3d(0,' + y + 'px,0)';
+		}
+	}
+
+	pageSet(st, info, animate) {
+		const t = String(info.page);
+		const changed = st.pageTxt !== t;
+		if (changed) {
+			st.pageTxt = t;
+			st.pageNum.textContent = t;
+		}
+		if (st.pageTot !== info.total) {
+			st.pageTot = info.total;
+			st.pageOf.textContent = 'of ' + info.total;
+		}
+		const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+		if (animate && changed && !reduced && st.pageNum.animate) {
+			st.pageNum.animate([{ transform: 'scale(1.22)' }, { transform: 'scale(1)' }], { duration: 130, easing: 'ease-out' });
+		}
+	}
+
 	placeThumb(st, vpTop, vpH) {
 		const v = st.vpEl.style;
 		if (st.lastVpH !== vpH) {
@@ -3077,6 +3419,7 @@ class NoteMinimapPlugin extends Plugin {
 			st.lastVpTop = vpTop;
 			v.transform = 'translate3d(0,' + vpTop + 'px,0)';
 		}
+		this.pageTick(st, vpTop, vpH);
 	}
 
 	updateViewport(st, livePos) {
@@ -3121,6 +3464,7 @@ class NoteMinimapPlugin extends Plugin {
 		const maxView = Math.max(1, shV - ch);
 		// While you drag the thumb it stays glued to your finger; the note catches up.
 		const shown = sb && st.lead ? st.target : live ? livePos : sc.scrollTop;
+		st.pageY = shown;
 		const frac = Math.min(1, Math.max(0, shown / maxView));
 		const e = st.el.style;
 
@@ -3352,10 +3696,147 @@ class MinimapSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
+	// Every toggle here that shows or hides other rows rebuilds the whole tab, and an emptied tab lost its scroll
+	// position, so the list jumped back to the top. Rebuilding now keeps the place: the scroll position is read first
+	// and put back as soon as the rows are drawn again (and once more a frame later, after layout settles).
 	display() {
+		const box = this.scrollBox();
+		const top = box ? box.scrollTop : 0;
+		this.build();
+		if (box && top > 0) {
+			box.scrollTop = top;
+			requestAnimationFrame(() => {
+				box.scrollTop = top;
+			});
+		}
+	}
+
+	// Opens or closes a group of rows with the same motion as the colour panel. Opening: the layout changes once and the
+	// rows fade and slide down into place. Closing: the group shrinks away over a longer, softer curve while the rows
+	// below glide up on their own graphics layers. Not rebuilding the tab keeps the scroll position and everything else.
+	setFold(wrap, open) {
+		if (!wrap) return;
+		const was = !wrap.hasClass('nm-collapsed');
+		if (was === open && !wrap._foldEnd) return;
+		const inner = wrap.firstElementChild;
+		if (wrap._foldEnd) wrap._foldEnd(false);
+		if (wrap._foldOpen) {
+			wrap._foldOpen.cancel();
+			wrap._foldOpen = null;
+		}
+		const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+		if (reduced || !wrap.animate || !inner || !inner.animate) {
+			wrap.toggleClass('nm-collapsed', !open);
+			return;
+		}
+		if (open) {
+			wrap.removeClass('nm-collapsed');
+			const a = inner.animate(
+				[
+					{ opacity: 0, transform: 'translateY(-14px)' },
+					{ opacity: 1, transform: 'translateY(0)' },
+				],
+				{ duration: 260, easing: 'cubic-bezier(0.2, 0.8, 0.2, 1)' }
+			);
+			wrap._foldOpen = a;
+			a.onfinish = () => {
+				wrap._foldOpen = null;
+			};
+			return;
+		}
+		const full = wrap.offsetHeight;
+		// Everything that sits after the group, at its own level and at every level above it (a group can be nested in
+		// another one), is what moves up while the group shrinks.
+		const below = [];
+		const root = this.containerEl;
+		for (let el = wrap; el && el !== root; el = el.parentElement) {
+			for (let n = el.nextElementSibling; n; n = n.nextElementSibling) below.push(n);
+		}
+		// The shrinking group is not the only thing that moves the rows below: the gaps between neighbouring rows change
+		// once the group is clipped (margins stop merging through it), and change again when it is finally removed. Left
+		// alone, the rows glide up and then jump the last few pixels at the very end. So the layout is measured at the four
+		// moments that matter (before, folding at full height, folding at zero height, removed) and the rows below are
+		// moved by the difference with a transform that runs on the same curve as the height, so the whole motion is one
+		// continuous glide from where the rows are now to where they end up.
+		let shiftFrom = 0;
+		let shiftTo = 0;
+		// The first one that is actually drawn: a closed group next to it is display:none and has no position to measure.
+		const ref = below.find((n) => n.getClientRects().length > 0);
+		if (ref) {
+			const box = this.scrollBox();
+			const keep = box ? box.scrollTop : 0;
+			const yA = ref.getBoundingClientRect().top;
+			wrap.addClass('nm-folding');
+			wrap.style.height = full + 'px';
+			const yB = ref.getBoundingClientRect().top;
+			wrap.style.height = '0px';
+			const yC = ref.getBoundingClientRect().top;
+			wrap.style.height = '';
+			wrap.removeClass('nm-folding');
+			wrap.addClass('nm-collapsed');
+			const yD = ref.getBoundingClientRect().top;
+			wrap.removeClass('nm-collapsed');
+			if (box) box.scrollTop = keep;
+			shiftFrom = yA - yB;
+			shiftTo = yD - yC;
+		}
+		for (const n of below) n.style.willChange = 'transform';
+		wrap.addClass('nm-folding');
+		const hAnim = wrap.animate([{ height: full + 'px' }, { height: '0px' }], {
+			duration: 460,
+			easing: 'cubic-bezier(0.32, 0.72, 0, 1)',
+			fill: 'forwards',
+		});
+		const sAnims = [];
+		if (Math.abs(shiftFrom) > 0.5 || Math.abs(shiftTo) > 0.5) {
+			for (const n of below) {
+				if (!n.animate) continue;
+				sAnims.push(
+					n.animate(
+						[{ transform: 'translateY(' + shiftFrom + 'px)' }, { transform: 'translateY(' + shiftTo + 'px)' }],
+						{ duration: 460, easing: 'cubic-bezier(0.32, 0.72, 0, 1)', fill: 'forwards' }
+					)
+				);
+			}
+		}
+		const fAnim = inner.animate(
+			[
+				{ opacity: 1, transform: 'translateY(0)' },
+				{ opacity: 0, transform: 'translateY(-18px)' },
+			],
+			{ duration: 300, easing: 'ease-in', fill: 'forwards' }
+		);
+		wrap._foldEnd = (finished) => {
+			wrap._foldEnd = null;
+			hAnim.onfinish = null;
+			wrap.toggleClass('nm-collapsed', finished);
+			hAnim.cancel();
+			fAnim.cancel();
+			for (const a of sAnims) a.cancel();
+			wrap.removeClass('nm-folding');
+			for (const n of below) n.style.willChange = '';
+		};
+		hAnim.onfinish = () => wrap._foldEnd && wrap._foldEnd(true);
+	}
+
+	// The element that scrolls the settings page.
+	scrollBox() {
+		let el = this.containerEl;
+		while (el && el !== document.body) {
+			if (el.classList && el.classList.contains('vertical-tab-content')) return el;
+			const oy = getComputedStyle(el).overflowY;
+			if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight) return el;
+			el = el.parentElement;
+		}
+		return this.containerEl.closest('.vertical-tab-content') || null;
+	}
+
+	build() {
 		const { containerEl } = this;
 		const p = this.plugin;
 		containerEl.empty();
+
+		new Setting(containerEl).setName('Controls').setHeading();
 
 		new Setting(containerEl)
 			.setName('Touch controls')
@@ -3387,16 +3868,9 @@ class MinimapSettingTab extends PluginSettingTab {
 				})
 			);
 
-		new Setting(containerEl)
-			.setName('Fast rendering')
-			.setDesc('Makes the minimap run faster on long notes. It looks the same.')
-			.addToggle((t) =>
-				t.setValue(p.settings.fastRender).onChange(async (v) => {
-					p.settings.fastRender = v;
-					await p.saveSettings();
-				})
-			);
+		new Setting(containerEl).setName('Look').setHeading();
 
+		const styleFolds = {};
 		new Setting(containerEl)
 			.setName('Style')
 			.setDesc('Scrollbar is a thin bar you drag. Minimap is a small preview of your note (can be slow on long notes).')
@@ -3407,8 +3881,9 @@ class MinimapSettingTab extends PluginSettingTab {
 					.setValue(p.settings.style)
 					.onChange(async (v) => {
 						p.settings.style = v;
+						this.setFold(styleFolds.sb && styleFolds.sb.wrap, v === 'scrollbar');
+						this.setFold(styleFolds.mm && styleFolds.mm.wrap, v !== 'scrollbar');
 						await p.saveSettings();
-						this.display();
 					})
 			);
 
@@ -3426,9 +3901,18 @@ class MinimapSettingTab extends PluginSettingTab {
 					})
 			);
 
+		// Rows that belong to a toggle sit in a wrapper that folds open and shut (see .nm-collapse), so flipping the
+		// toggle animates them in place instead of rebuilding the whole tab.
+		let host = containerEl; // where the rows being built go (a fold's inner box while one is being filled)
+		const fold = (on) => {
+			const wrap = host.createDiv({ cls: 'nm-collapse' });
+			const inner = wrap.createDiv({ cls: 'nm-collapse-inner' });
+			wrap.toggleClass('nm-collapsed', !on);
+			return { wrap, inner };
+		};
 		const comps = {};
-		const slider = (name, desc, key, min, max, step, adjust) =>
-			this.withReset(new Setting(containerEl)
+		const slider = (name, desc, key, min, max, step, adjust, parent) =>
+			this.withReset(new Setting(parent || host)
 				.setName(name)
 				.setDesc(desc)
 				.addSlider((sl) => {
@@ -3445,7 +3929,29 @@ class MinimapSettingTab extends PluginSettingTab {
 					this.addFineControls(sl, min, max, step, apply);
 				}), [key], comps);
 
-		if (p.settings.style === 'scrollbar') {
+		// Page length folds away under the toggle. Switching it must not rebuild the whole tab (that threw the
+		// list back to the top), so the row is always there and only collapses.
+		const pageWrap = containerEl.createDiv({ cls: 'nm-collapse' });
+		const pageInner = pageWrap.createDiv({ cls: 'nm-collapse-inner' });
+		pageWrap.toggleClass('nm-collapsed', p.settings.pageBubble === false);
+
+		new Setting(containerEl)
+			.setName('Page bubble')
+			.setDesc('Show a small circle with the page number when you scroll.')
+			.addToggle((t) =>
+				t.setValue(p.settings.pageBubble !== false).onChange(async (v) => {
+					p.settings.pageBubble = v;
+					this.setFold(pageWrap, v);
+					await p.saveSettings();
+				})
+			);
+		containerEl.insertBefore(pageWrap, null); // keeps the row right under the toggle
+
+		slider('Page length', 'How much text is one page, in characters. Counted in the text, so rotating or unfolding never changes it.', 'pageLen', 600, 4000, 100, undefined, pageInner);
+
+		styleFolds.sb = fold(p.settings.style === 'scrollbar');
+		host = styleFolds.sb.inner;
+		{
 			slider('Bar width', 'How wide the bar is, in pixels.', 'thumbWidth', 6, 40, 1, () => {
 				const need = p.barWidth() + 6;
 				if (p.settings.hitWidth < need) {
@@ -3453,7 +3959,7 @@ class MinimapSettingTab extends PluginSettingTab {
 					if (comps.hitWidth) comps.hitWidth.setValue(need);
 				}
 			});
-			new Setting(containerEl)
+			new Setting(host)
 				.setName('Shape')
 				.setDesc('How round the bar corners are.')
 				.addDropdown((d) =>
@@ -3468,7 +3974,7 @@ class MinimapSettingTab extends PluginSettingTab {
 						})
 				);
 
-			this.addColorSetting(containerEl, {
+			this.addColorSetting(host, {
 				name: 'Colour',
 				desc: 'Auto matches your theme. Custom lets you pick any colour.',
 				key: 'thumbColor',
@@ -3477,7 +3983,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 			slider('Opacity', 'How solid the bar looks.', 'thumbOpacity', 0.2, 1, 0.05);
 
-			new Setting(containerEl)
+			new Setting(host)
 				.setName('Show track')
 				.setDesc('Show a faint line behind the bar.')
 				.addToggle((t) =>
@@ -3487,39 +3993,42 @@ class MinimapSettingTab extends PluginSettingTab {
 					})
 				);
 
-			new Setting(containerEl)
+			new Setting(host)
 				.setName('Glow')
 				.setDesc('Add a soft glow around the bar.')
 				.addToggle((t) =>
 					t.setValue(p.settings.glow).onChange(async (v) => {
 						p.settings.glow = v;
+						this.setFold(glowFold.wrap, v);
 						await p.saveSettings();
-						this.display();
 					})
 				);
 
-			if (p.settings.glow) {
-				this.addColorSetting(containerEl, {
-					name: 'Glow colour',
-					desc: 'Auto matches the bar. Custom lets you pick a colour.',
-					key: 'glowColor',
-					fallback: '#d19a66',
-				});
-				slider('Glow size', 'How far the glow spreads, in pixels.', 'glowBlur', 0, 40, 1);
-				slider('Glow strength', 'How thick the glow is, in pixels.', 'glowSpread', 0, 10, 1);
-				slider('Glow opacity', 'How bright the glow is.', 'glowOpacity', 0.1, 1, 0.05);
-			}
+			const glowFold = fold(p.settings.glow);
+			this.addColorSetting(glowFold.inner, {
+				name: 'Glow colour',
+				desc: 'Auto matches the bar. Custom lets you pick a colour.',
+				key: 'glowColor',
+				fallback: '#d19a66',
+			});
+			slider('Glow size', 'How far the glow spreads, in pixels.', 'glowBlur', 0, 40, 1, undefined, glowFold.inner);
+			slider('Glow strength', 'How thick the glow is, in pixels.', 'glowSpread', 0, 10, 1, undefined, glowFold.inner);
+			slider('Glow opacity', 'How bright the glow is.', 'glowOpacity', 0.1, 1, 0.05, undefined, glowFold.inner);
 
 			const dev = p.device();
 			const auto = ['insetTop', 'insetBottom', 'insetEdge'].every((k) => p.settings[k] === null);
-			new Setting(containerEl)
+			new Setting(host).setName('Margins and arrows').setHeading();
+
+			const marginText = (isAuto) =>
+				(isAuto ? 'Automatic: ' : 'Custom. Device default: ') +
+				'top ' + dev.insetTop + ', bottom ' + dev.insetBottom + ', side ' + dev.insetEdge +
+				' px.' + (isAuto ? ' Move a slider below to set your own.' : '');
+			let marginBtn = null;
+			const marginRow = new Setting(host)
 				.setName('Margins for this device')
-				.setDesc(
-					(auto ? 'Automatic: ' : 'Custom. Device default: ') +
-						'top ' + dev.insetTop + ', bottom ' + dev.insetBottom + ', side ' + dev.insetEdge +
-						' px.' + (auto ? ' Move a slider below to set your own.' : '')
-				)
-				.addButton((b) =>
+				.setDesc(marginText(auto))
+				.addButton((b) => {
+					marginBtn = b;
 					b
 						.setButtonText('Use device defaults')
 						.setDisabled(auto)
@@ -3528,9 +4037,14 @@ class MinimapSettingTab extends PluginSettingTab {
 							p.settings.insetBottom = null;
 							p.settings.insetEdge = null;
 							await p.saveSettings();
-							this.display();
-						})
-				);
+							// Update the row and the three sliders where they are; nothing is rebuilt.
+							marginRow.setDesc(marginText(true));
+							b.setDisabled(true);
+							for (const k of ['insetTop', 'insetBottom', 'insetEdge']) {
+								if (comps[k]) comps[k].setValue(p.inset(k));
+							}
+						});
+				});
 
 			slider('Top margin', 'Space above the bar, so the screen corner does not cover it.', 'insetTop', 0, 240, 2);
 			slider('Bottom margin', 'Space below the bar, so the gesture bar does not cover it.', 'insetBottom', 0, 240, 2);
@@ -3543,27 +4057,44 @@ class MinimapSettingTab extends PluginSettingTab {
 				}
 			});
 
-			new Setting(containerEl)
+			new Setting(host)
 				.setName('Arrow buttons')
 				.setDesc('Add up and down arrows. Tap to scroll a little, hold to keep scrolling.')
 				.addToggle((t) =>
 					t.setValue(p.settings.showArrows).onChange(async (v) => {
 						p.settings.showArrows = v;
+						this.setFold(arrowFold.wrap, v);
 						await p.saveSettings();
-						this.display();
 					})
 				);
 
-			if (p.settings.showArrows) {
-				slider('Arrow size', 'How big each arrow button is, in pixels.', 'arrowSize', 14, 80, 1);
-				slider('Step per tap', 'How far one tap scrolls, in pixels.', 'stepSize', 40, 600, 10);
-				slider('Hold speed', 'How fast the note scrolls while you hold an arrow. Higher is faster.', 'holdSpeed', 100, 4000, 20);
-			}
-		} else {
+			const arrowFold = fold(p.settings.showArrows);
+			slider('Arrow size', 'How big each arrow button is, in pixels.', 'arrowSize', 14, 80, 1, undefined, arrowFold.inner);
+			slider('Step per tap', 'How far one tap scrolls, in pixels.', 'stepSize', 40, 600, 10, undefined, arrowFold.inner);
+			slider('Hold speed', 'How fast the note scrolls while you hold an arrow. Higher is faster.', 'holdSpeed', 100, 4000, 20, undefined, arrowFold.inner);
+		}
+		host = containerEl;
+		styleFolds.mm = fold(p.settings.style !== 'scrollbar');
+		host = styleFolds.mm.inner;
+		{
+			new Setting(host)
+				.setName('Fast rendering')
+				.setDesc('Makes the minimap run faster on long notes. It looks the same.')
+				.addToggle((t) =>
+					t.setValue(p.settings.fastRender).onChange(async (v) => {
+						p.settings.fastRender = v;
+						await p.saveSettings();
+					})
+				);
+
 			slider('Width', 'How wide the minimap is, as a % of the note.', 'width', 3, 30, 1);
 			slider('Top offset', 'How far down from the top it starts, in %.', 'top', 0, 50, 1);
 			slider('Height', 'How tall the minimap is, as a % of the note.', 'height', 20, 100, 5);
+		
 		}
+		host = containerEl;
+
+		new Setting(containerEl).setName('Scrolling').setHeading();
 
 		new Setting(containerEl)
 			.setName('Smooth scrolling')
@@ -3571,20 +4102,25 @@ class MinimapSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(p.settings.smooth).onChange(async (v) => {
 					p.settings.smooth = v;
+					this.setFold(smoothFold.wrap, v);
 					await p.saveSettings();
-					this.display();
 				})
 			);
+
+		const smoothFold = fold(p.settings.smooth);
+		slider('Glide length', 'How long the glide lasts, in milliseconds. Longer is softer.', 'smoothMs', 80, 800, 20, undefined, smoothFold.inner);
 
 		{
 			const cur = p.settings.refreshRate || 0;
 			const rates = [60, 90, 120, 144];
 			if (cur && !rates.includes(cur)) rates.push(cur);
 			rates.sort((a, b) => a - b);
+			let rateDD = null;
 			new Setting(containerEl)
 				.setName('Screen refresh rate')
 				.setDesc('Helps arrow scrolling stay smooth. Leave on Automatic unless it looks jumpy.')
 				.addDropdown((d) => {
+					rateDD = d;
 					d.addOption('0', 'Automatic');
 					for (const r of rates) d.addOption(String(r), r + ' Hz');
 					d.setValue(String(cur)).onChange(async (v) => {
@@ -3595,7 +4131,12 @@ class MinimapSettingTab extends PluginSettingTab {
 				})
 				.addButton((b) =>
 					b.setButtonText('Measure').onClick(() => {
-						new RefreshRateModal(this.app, p, () => this.display()).open();
+						new RefreshRateModal(this.app, p, () => {
+							// Show the measured rate in the dropdown without rebuilding the page.
+							const now = p.settings.refreshRate || 0;
+							if (rateDD && !rateDD.selectEl.querySelector('option[value="' + now + '"]')) rateDD.addOption(String(now), now + ' Hz');
+							if (rateDD) rateDD.setValue(String(now));
+						}).open();
 					})
 				);
 		}
@@ -3608,12 +4149,13 @@ class MinimapSettingTab extends PluginSettingTab {
 					p.settings.animateBars = v;
 					await p.saveSettings();
 					p.refreshBarsSetting();
-					this.display();
+					this.setFold(barsFold.wrap, v);
 				})
 			);
 
-		if (p.settings.animateBars) {
-			new Setting(containerEl)
+		const barsFold = fold(p.settings.animateBars);
+		{
+			new Setting(barsFold.inner)
 				.setName('Bar animation')
 				.setDesc('How the bars leave and come back.')
 				.addDropdown((d) =>
@@ -3628,8 +4170,10 @@ class MinimapSettingTab extends PluginSettingTab {
 							p.applyBarsLook();
 						})
 				);
-			slider('Bar animation speed', 'How long the bars take to move, in milliseconds. Lower is quicker.', 'barsMs', 150, 900, 10, () => p.applyBarsLook());
+			slider('Bar animation speed', 'How long the bars take to move, in milliseconds. Lower is quicker.', 'barsMs', 150, 900, 10, () => p.applyBarsLook(), barsFold.inner);
 		}
+
+		new Setting(containerEl).setName('Performance').setHeading();
 
 		new Setting(containerEl)
 			.setName('Get ready while Obsidian starts')
@@ -3666,7 +4210,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Hold back jumps')
-			.setDesc('While you hold an arrow, if the editor suddenly shifts the note by more than the text moved, put it back instead of keeping the jump. Turn off if holding feels worse.')
+			.setDesc('Stops sudden jumps while you hold an arrow: if the note moves more than the text did, it is put back.')
 			.addToggle((t) =>
 				t.setValue(p.settings.holdGuard !== false).onChange(async (v) => {
 					p.settings.holdGuard = v;
@@ -3684,9 +4228,7 @@ class MinimapSettingTab extends PluginSettingTab {
 				})
 			);
 
-		if (p.settings.smooth) {
-			slider('Glide length', 'How long the glide lasts, in milliseconds. Longer is softer.', 'smoothMs', 80, 800, 20);
-		}
+		new Setting(containerEl).setName('Other').setHeading();
 
 		new Setting(containerEl)
 			.setName('Hide on mobile')
@@ -4281,3 +4823,5 @@ class MinimapSettingTab extends PluginSettingTab {
 
 NoteMinimapPlugin.classify = (text) => classify(text, 0).items;
 module.exports = NoteMinimapPlugin;
+
+/* nosourcemap */

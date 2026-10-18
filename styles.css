@@ -1287,3 +1287,137 @@ html body.nm-hold-lite.nm-hold-lite .workspace-tab-header-container {
 @media (prefers-reduced-motion: reduce) {
 	.nm-slider-row .nm-slider-value.nm-pop { animation: none; }
 }
+
+/* ---- Page bubble ----
+   A pill that grows out of the bar beside the thumb while the note scrolls and says which page you are on. The
+   outer element only follows the thumb up and down (a transform set by the script); the inner one does the pop,
+   so the two never fight over the same transform. It springs out with a small overshoot. Before it leaves it
+   settles into the colour the thumb has when it is not being used (the bar's colour at its resting opacity), and
+   then slips back into the bar a little faster than it came. */
+.nm-page {
+	position: absolute;
+	top: 0;
+	z-index: 31;
+	height: 38px;
+	pointer-events: none;
+	visibility: hidden;
+	will-change: transform;
+	contain: layout style;
+	/* Hidden only once the slip back in has finished. */
+	transition: visibility 0s linear 0.2s;
+}
+
+.nm-page.nm-page-on {
+	visibility: visible;
+	transition-delay: 0s;
+}
+
+.nm-page-b {
+	box-sizing: border-box;
+	height: 100%;
+	min-width: 68px;
+	padding: 0 16px;
+	border-radius: 999px;
+	display: flex;
+	flex-direction: row;
+	align-items: baseline;
+	justify-content: center;
+	gap: 6px;
+	line-height: 38px;
+	white-space: nowrap;
+	background: var(--nm-page-bg, var(--text-accent));
+	color: var(--nm-page-fg, var(--text-on-accent));
+	position: relative;
+	opacity: 0;
+	transform-origin: var(--nm-page-origin, right center);
+	transform: translate3d(var(--nm-page-from, 30px), 0, 0) scale(0.2);
+	scale: 0;
+	transition: transform 0.14s cubic-bezier(0.5, 0, 1, 0.6), opacity 0.12s linear;
+}
+
+/* The shadow lives on its own layer so that fading it out is only an opacity change (no repainting of the shadow
+   on every frame of the exit). Outer shadows are clipped to outside the box, so it looks exactly as before. */
+.nm-page-b::before {
+	content: '';
+	position: absolute;
+	inset: 0;
+	border-radius: inherit;
+	box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+	pointer-events: none;
+	z-index: -1;
+}
+
+.nm-page-on .nm-page-b::before {
+	transition: opacity 0.3s ease-out;
+}
+
+.nm-page-on .nm-page-b {
+	opacity: 1;
+	transform: translate3d(0, 0, 0) scale(1);
+	scale: 1;
+	transition: transform 0.2s cubic-bezier(0.18, 1.35, 0.4, 1), opacity 0.09s linear,
+		scale 0s;
+}
+
+/* Leaving: the pill keeps its shape and shrinks, numbers and all, toward its edge next to the bar (the transform
+   origin), first to about half size and then away to nothing. That edge stays where it is, so it never reaches the bar. */
+.nm-page-on.nm-page-fade .nm-page-b {
+	/* First it settles into the look the thumb has when it is not being used (its resting opacity, no shadow;
+	   the number stays), and the shrink starts at once, so it is one continuous motion. */
+	opacity: var(--nm-page-idle-op, 0.75);
+	animation: nm-page-close 0.46s linear forwards;
+	transition: opacity 0.3s ease-out, scale 0s;
+	will-change: scale, opacity;
+}
+
+.nm-page-on.nm-page-fade .nm-page-b::before {
+	opacity: 0;
+}
+
+@keyframes nm-page-close {
+	0% { scale: 1; animation-timing-function: cubic-bezier(0.4, 0, 0.3, 1); }
+	55% { scale: 0.5; animation-timing-function: cubic-bezier(0.6, 0, 0.9, 0.5); }
+	100% { scale: 0; }
+}
+
+.nm-page-n,
+.nm-page-of {
+	transition: opacity 0.18s ease;
+}
+
+.nm-page-n {
+	font-size: 18px;
+	font-weight: 700;
+	font-variant-numeric: tabular-nums;
+}
+
+.nm-page-of {
+	font-size: 11px;
+	opacity: 0.85;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.nm-page-b,
+	.nm-page-on .nm-page-b {
+		transform: none;
+		scale: 1;
+		animation: none !important;
+		transition: opacity 0.1s linear;
+	}
+}
+
+/* Settings rows that fold away under a toggle. The motion is the colour panel's: opening fades and slides the rows
+   down into place, closing shrinks the group away while the rows below glide up (both done from script, see
+   setFold, so nothing here is rebuilt and the page keeps its scroll position). */
+.nm-collapse.nm-collapsed {
+	display: none;
+}
+
+.nm-collapse.nm-folding {
+	overflow: hidden;
+}
+
+/* Rows inside a fold keep the divider Obsidian draws above every row except the first one of a list. */
+.nm-collapse > .nm-collapse-inner > .setting-item:first-child {
+	border-top: 1px solid var(--background-modifier-border);
+}
