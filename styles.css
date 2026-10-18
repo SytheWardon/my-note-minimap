@@ -1421,3 +1421,10 @@ html body.nm-hold-lite.nm-hold-lite .workspace-tab-header-container {
 .nm-collapse > .nm-collapse-inner > .setting-item:first-child {
 	border-top: 1px solid var(--background-modifier-border);
 }
+
+/* Obsidian's pull-down label ("Do nothing (pull-down action)" and the like): tagged by the plugin, never shown. */
+[data-nm-nopull] {
+	visibility: hidden;
+	opacity: 0;
+	pointer-events: none;
+}

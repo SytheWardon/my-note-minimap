@@ -1632,6 +1632,7 @@ class NoteMinimapPlugin extends Plugin {
 		if (!Platform.isMobile) return;
 		const RE = /Action not configured|Configure pull action|Do nothing \(pull-down action\)/;
 		const hideIfPrompt = (n) => {
+			if (n && n.nodeType === 3) n = n.parentElement; // text set on an existing label arrives as a text node
 			if (!(n instanceof HTMLElement) || n.hasAttribute('data-nm-nopull') || n.closest('.note-minimap, .modal, .vertical-tab-content')) return false;
 			if (n.childElementCount > 8) return false;
 			const t = n.textContent;
@@ -1640,6 +1641,9 @@ class NoteMinimapPlugin extends Plugin {
 			let el = n;
 			while (el.parentElement && el.parentElement !== document.body && el.parentElement.textContent.length <= t.length + 2) el = el.parentElement;
 			el.setAttribute('data-nm-nopull', '');
+			// Actually hide it (the attribute alone changes nothing). Inline and important, so Obsidian's own inline styles on the label can't win.
+			el.style.setProperty('visibility', 'hidden', 'important');
+			el.style.setProperty('opacity', '0', 'important');
 			return true;
 		};
 		const scan = () => {
@@ -4824,4 +4828,5 @@ class MinimapSettingTab extends PluginSettingTab {
 NoteMinimapPlugin.classify = (text) => classify(text, 0).items;
 module.exports = NoteMinimapPlugin;
 
+/* nosourcemap */
 /* nosourcemap */
