@@ -1450,7 +1450,8 @@ html body.nm-hold-lite.nm-hold-lite .workspace-tab-header-container {
 
 /* The rolling ring shown in the button while it checks or installs: text frames swapped from script (see
    paintUpdate in main.js), so nothing here is animated. A fixed-width box keeps the button from jiggling. */
-.setting-item button.nm-upd-btn .nm-upd-spin {
+/* Selector repeated on purpose: it wins over a theme's rules by specificity, so nothing has to be forced. */
+.setting-item button.nm-upd-btn.nm-upd-btn.nm-upd-btn .nm-upd-spin.nm-upd-spin.nm-upd-spin {
 	display: inline-block;
 	min-width: 1.6em;
 	text-align: center;
@@ -1458,8 +1459,8 @@ html body.nm-hold-lite.nm-hold-lite .workspace-tab-header-container {
 	font-size: 1.6em;
 	font-weight: 700;
 	vertical-align: middle;
-	color: var(--text-normal) !important;
-	-webkit-text-fill-color: var(--text-normal) !important;
-	opacity: 1 !important;
-	visibility: visible !important;
+	color: var(--text-normal);
+	-webkit-text-fill-color: var(--text-normal);
+	opacity: 1;
+	visibility: visible;
 }

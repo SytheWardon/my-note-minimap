@@ -239,6 +239,8 @@ Nothing is sent about you or your notes, and nothing else leaves your device. No
 
 ## Version history
 
+- **4.5.2:** Version bump only. No change in behaviour.
+- **4.5.1:** Removed the `!important` rules from the stylesheet (the update-check ring now wins by selector specificity). No change in behaviour.
 - **4.5.0:** Plugin name, notices and log messages are back to *My Note Minimap* (the *[Scrollbar]* name tried in 4.3.9 and 4.4.0 is removed). No other change.
 - **4.3.8:** *Arrow tap does* now defaults to *Jump to heading*. Arrow buttons are taller by default (*Arrow size* 52 px, was 36) so a single tap lands easily; the old default is upgraded once, a size you chose yourself is kept. *Check for updates* no longer makes the area behind the settings window's rounded corners flash black while it checks: the button is no longer disabled, and a small ring turns in it instead. README now lists every setting.
 - **4.3.1:** Fixed *Jump to heading*: a tap that lasted a little long counted as a hold and moved the note only a few pixels, so the arrow seemed to do nothing. A press now has to last half a second to count as a hold, and a heading that is too close to move to is skipped for the next one (or a normal step). *Words read* is removed from *Bubble shows* and *Buzz on*.
