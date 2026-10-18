@@ -239,6 +239,7 @@ Nothing is sent about you or your notes, and nothing else leaves your device. No
 
 ## Version history
 
+- **4.5.3:** The *Version* line under *Updates* now reads the installed `manifest.json` from disk, so it shows the right number right after an update (Obsidian only re-reads it at start-up, so it kept showing the old version, and *Check for updates* kept offering the same update). No other change.
 - **4.5.2:** Version bump only. No change in behaviour.
 - **4.5.1:** Removed the `!important` rules from the stylesheet (the update-check ring now wins by selector specificity). No change in behaviour.
 - **4.5.0:** Plugin name, notices and log messages are back to *My Note Minimap* (the *[Scrollbar]* name tried in 4.3.9 and 4.4.0 is removed). No other change.
