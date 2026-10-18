@@ -1401,8 +1401,14 @@ html body.nm-hold-lite.nm-hold-lite .workspace-tab-header-container {
 	.nm-page-on .nm-page-b {
 		transform: none;
 		scale: 1;
-		animation: none !important;
+		animation: none;
 		transition: opacity 0.1s linear;
+	}
+
+	/* The leaving state sets the close animation with a more specific selector, so the reset is matched to it here
+	   (only the animation: the fade state's own transition stays exactly as it was). */
+	.nm-page-on.nm-page-fade .nm-page-b {
+		animation: none;
 	}
 }
 

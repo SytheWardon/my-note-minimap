@@ -119,6 +119,7 @@ An optional report after a hold. It shows late frames and whether they came from
 
 ## Version history
 
+- **4.2.1:** New *Updates* section at the top of the settings: automatic check (about once a day, notice only) and a button to check now and install the latest GitHub release. Removed the last `!important` from the stylesheet (the reduced-motion rule now wins by selector specificity instead). No change in behaviour.
 - **4.2.0:** The pull-down label ("Do nothing (pull-down action)") is now actually hidden. The pull-down still does nothing.
 - **4.1.0:** Added the page bubble and pages, bar animation styles and speed, *Hold back jumps*, *Get ready while Obsidian starts*, automatic bar width, a regrouped settings page with fine slider controls and per-group reset, and the *Do nothing (pull-down action)* command. Rolls up everything since 3.0.1.
 - **3.0.1:** Fixed a note going blank after rotating, or a note opened from another note failing to appear. Holding back reading-view drawing is now only on while a finger is on an arrow, switches off when the scroll settles, and lets Obsidian draw at once for a different note, a rotation or an unlaid-out note.

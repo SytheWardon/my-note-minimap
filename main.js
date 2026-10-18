@@ -1,7 +1,7 @@
 'use strict';
 
 const obsidian = require('obsidian');
-const { Plugin, MarkdownView, PluginSettingTab, Setting, Platform, Notice, Modal, debounce, setIcon } = obsidian;
+const { Plugin, MarkdownView, PluginSettingTab, Setting, Platform, Notice, Modal, debounce, setIcon, requestUrl } = obsidian;
 
 // Obsidian's own setting for the pull-down Quick Action (Settings > Mobile > Configure mobile Quick Action).
 // Obsidian has no real "off": with nothing assigned, every pull-down shows an "Action not configured" prompt. So the
@@ -12,7 +12,25 @@ const QUICK_ACTION_OFF = 'my-note-minimap:pull-nothing';
 // A source line counts as at least this many characters of a page, so blank and short lines still take their place.
 const PAGE_MIN = 40;
 
+// Where updates come from: the latest GitHub release of this repository (owner/name). The release carries main.js,
+// manifest.json and styles.css, exactly what the release workflow publishes.
+const UPDATE_REPO = 'SytheWardon/my-note-minimap';
+const UPDATE_EVERY_MS = 24 * 60 * 60 * 1000; // the automatic check runs at most once a day
+
+// 1 if version a is newer than b, -1 if older, 0 if the same ("1.2.3" style, a leading "v" is ignored).
+function cmpVer(a, b) {
+	const pa = String(a).replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0);
+	const pb = String(b).replace(/^v/, '').split('.').map((n) => parseInt(n, 10) || 0);
+	for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+		const d = (pa[i] || 0) - (pb[i] || 0);
+		if (d) return d > 0 ? 1 : -1;
+	}
+	return 0;
+}
+
 const DEFAULTS = {
+	autoUpdate: true, // look for a new version about once a day, when Obsidian starts (it only tells you; installing is a tap)
+	lastUpdateCheck: 0,
 	style: 'scrollbar', // 'scrollbar' or 'minimap'
 	thumbWidth: null, // px, visible thumb. null = automatic: 14 on a typical phone, nudged a little up or down with screen size
 	hitWidth: 64, // px, invisible touch area around the thumb
@@ -465,6 +483,28 @@ class NoteMinimapPlugin extends Plugin {
 
 		// Ask for the screen's refresh rate once, on a phone or tablet, as soon as the workspace is up.
 		// Keep the pull-down Quick Action off, quietly, so the "configure" pop-up does not come back on a swipe down.
+		this.addCommand({
+			id: 'check-update',
+			name: 'Check for updates',
+			callback: async () => {
+				const r = await this.checkForUpdate();
+				if (r === 'available') new Notice('My Note Minimap ' + this._update.version + ' is available. Install it from the plugin settings.');
+				else if (r === 'current') new Notice('My Note Minimap is up to date (' + this.manifest.version + ').');
+				else if (r === 'error') new Notice('My Note Minimap: ' + (this._updMsg || 'could not check for updates.'));
+			},
+		});
+		// Automatic check: a few seconds after start-up, at most once a day, and only a notice, never an install.
+		this.app.workspace.onLayoutReady(() => {
+			if (!this.settings.autoUpdate) return;
+			if (Date.now() - (this.settings.lastUpdateCheck || 0) < UPDATE_EVERY_MS) return;
+			this._updTimer = window.setTimeout(async () => {
+				this._updTimer = null;
+				if (this._unloaded || !this.settings.autoUpdate) return;
+				if ((await this.checkForUpdate()) === 'available' && !this._unloaded) {
+					new Notice('My Note Minimap ' + this._update.version + ' is available. Install it from the plugin settings.', 8000);
+				}
+			}, 8000);
+		});
 		this.addCommand({ id: 'pull-nothing', name: 'Do nothing (pull-down action)', callback: () => {} });
 		this.app.workspace.onLayoutReady(() => this.keepQuickActionOff());
 		this.blockPullDown();
@@ -632,6 +672,89 @@ class NoteMinimapPlugin extends Plugin {
 		return typeof v === 'number' ? v : this.device()[key];
 	}
 
+	// ---- Updates ----
+	// Looks at the latest GitHub release. Returns 'available', 'current' or 'error' and leaves the details in
+	// this._updState / this._update / this._updMsg for the settings page to show.
+	async checkForUpdate() {
+		if (this._updBusy) return this._updState;
+		this._updBusy = true;
+		this._updState = 'checking';
+		this._updMsg = '';
+		try {
+			const res = await requestUrl({
+				url: 'https://api.github.com/repos/' + UPDATE_REPO + '/releases/latest',
+				headers: { Accept: 'application/vnd.github+json' },
+			});
+			const rel = res.json || {};
+			const latest = String(rel.tag_name || '').replace(/^v/, '');
+			if (!/^\d+\.\d+\.\d+/.test(latest)) throw new Error('The latest release has no version number.');
+			this.settings.lastUpdateCheck = Date.now();
+			this.saveDirty = true;
+			this.saveSoon();
+			if (cmpVer(latest, this.manifest.version) > 0) {
+				this._update = { version: latest, assets: Array.isArray(rel.assets) ? rel.assets : [] };
+				this._updState = 'available';
+			} else {
+				this._update = null;
+				this._updState = 'current';
+			}
+		} catch (e) {
+			this._updState = 'error';
+			this._updMsg = e && e.status === 404 ? 'No release was found on GitHub.' : 'Could not reach GitHub. Check your connection and try again.';
+		}
+		this._updBusy = false;
+		return this._updState;
+	}
+
+	// Downloads the three release files, checks them, writes them over the installed ones and reloads the plugin.
+	// Nothing is written unless all three downloaded and look right, so a failed download leaves the old version alone.
+	async installUpdate() {
+		const u = this._update;
+		if (!u || this._updBusy) return;
+		this._updBusy = true;
+		this._updState = 'installing';
+		this._updMsg = '';
+		try {
+			const get = async (name) => {
+				const a = u.assets.find((x) => x.name === name);
+				if (!a) throw new Error('The release is missing ' + name + '.');
+				return (await requestUrl({ url: a.browser_download_url })).text;
+			};
+			const [js, manifestTxt, css] = await Promise.all([get('main.js'), get('manifest.json'), get('styles.css')]);
+			let man;
+			try {
+				man = JSON.parse(manifestTxt);
+			} catch (e) {
+				throw new Error('The downloaded manifest is not valid.');
+			}
+			if (man.id !== this.manifest.id || man.version !== u.version) throw new Error('The release files do not match its version.');
+			if (js.length < 1000 || !js.includes('NoteMinimapPlugin')) throw new Error('The downloaded main.js looks incomplete.');
+			const ad = this.app.vault.adapter;
+			const dir = this.manifest.dir;
+			await ad.write(dir + '/styles.css', css);
+			await ad.write(dir + '/manifest.json', manifestTxt);
+			await ad.write(dir + '/main.js', js); // last, so the code only changes once everything else is in place
+		} catch (e) {
+			this._updBusy = false;
+			this._updState = 'error';
+			this._updMsg = (e && e.message) || 'The update failed.';
+			return;
+		}
+		this._updBusy = false;
+		this.flushSave();
+		new Notice('My Note Minimap updated to ' + u.version + '. Reloading the plugin…');
+		const plugins = this.app.plugins;
+		const id = this.manifest.id;
+		window.setTimeout(async () => {
+			try {
+				await plugins.disablePlugin(id);
+				await plugins.enablePlugin(id);
+			} catch (e) {
+				new Notice('Updated. Restart Obsidian to finish.');
+			}
+		}, 400);
+	}
+
 	onunload() {
 		this.removeStartHook();
 		for (const st of this.states.values()) this.ungateRender(st, true);
@@ -639,6 +762,7 @@ class NoteMinimapPlugin extends Plugin {
 		this._unloaded = true;
 		this.uninstallLoadBoost();
 		if (this._askTimer) clearTimeout(this._askTimer);
+		if (this._updTimer) clearTimeout(this._updTimer);
 		this.flushSave();
 		this.clearToast();
 		for (const view of Array.from(this.states.keys())) this.detach(view);
@@ -3839,6 +3963,51 @@ class MinimapSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		const p = this.plugin;
 		containerEl.empty();
+
+		new Setting(containerEl).setName('Updates').setHeading();
+
+		new Setting(containerEl)
+			.setName('Check for updates automatically')
+			.setDesc('Looks for a new version about once a day when Obsidian starts and shows a notice if there is one. It never installs by itself.')
+			.addToggle((t) =>
+				t.setValue(p.settings.autoUpdate).onChange(async (v) => {
+					p.settings.autoUpdate = v;
+					p.saveDirty = true;
+					p.saveSoon();
+				})
+			);
+
+		const updRow = new Setting(containerEl).setName('Version ' + p.manifest.version);
+		let updBtn = null;
+		const paintUpdate = () => {
+			const st = p._updState;
+			const u = p._update;
+			let desc = 'Check GitHub for a newer version.';
+			if (p.settings.lastUpdateCheck) desc = 'Last checked ' + new Date(p.settings.lastUpdateCheck).toLocaleString() + '.';
+			if (st === 'checking') desc = 'Checking…';
+			else if (st === 'installing') desc = 'Downloading and installing ' + (u ? u.version : '') + '…';
+			else if (st === 'current') desc = 'You have the latest version.';
+			else if (st === 'available' && u) desc = 'Version ' + u.version + ' is available.';
+			else if (st === 'error') desc = p._updMsg || 'The update failed.';
+			updRow.setDesc(desc);
+			if (!updBtn) return;
+			const busy = st === 'checking' || st === 'installing';
+			updBtn.setDisabled(busy);
+			updBtn.setButtonText(u ? 'Update to ' + u.version : 'Check for updates');
+			if (u) updBtn.setCta();
+			else updBtn.removeCta();
+		};
+		updRow.addButton((b) => {
+			updBtn = b;
+			b.onClick(async () => {
+				if (p._updBusy) return;
+				const run = p._update ? p.installUpdate() : p.checkForUpdate();
+				paintUpdate(); // shows "Checking…" / "Installing…" while it runs
+				await run;
+				paintUpdate();
+			});
+		});
+		paintUpdate();
 
 		new Setting(containerEl).setName('Controls').setHeading();
 
