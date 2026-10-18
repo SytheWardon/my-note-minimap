@@ -1434,3 +1434,32 @@ html body.nm-hold-lite.nm-hold-lite .workspace-tab-header-container {
 	opacity: 0;
 	pointer-events: none;
 }
+
+/* ---- Settings: "Check for updates" while it runs ----
+   The button is never disabled (Obsidian would draw a spinning loader in it and the animation made the area behind
+   the modal's rounded corners flash black). It is only dimmed and ignores touches; its label stays put. */
+.setting-item button.nm-upd-btn.nm-upd-busy {
+	pointer-events: none;
+	cursor: default;
+}
+.setting-item button.nm-upd-btn::before,
+.setting-item button.nm-upd-btn::after {
+	content: none;
+	animation: none;
+}
+
+/* The rolling ring shown in the button while it checks or installs: text frames swapped from script (see
+   paintUpdate in main.js), so nothing here is animated. A fixed-width box keeps the button from jiggling. */
+.setting-item button.nm-upd-btn .nm-upd-spin {
+	display: inline-block;
+	min-width: 1.6em;
+	text-align: center;
+	line-height: 1;
+	font-size: 1.6em;
+	font-weight: 700;
+	vertical-align: middle;
+	color: var(--text-normal) !important;
+	-webkit-text-fill-color: var(--text-normal) !important;
+	opacity: 1 !important;
+	visibility: visible !important;
+}

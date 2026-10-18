@@ -29,7 +29,7 @@ function cmpVer(a, b) {
 }
 
 const DEFAULTS = {
-	autoUpdate: true, // look for a new version about once a day, when Obsidian starts (it only tells you; installing is a tap)
+	autoUpdate: false, // opt-in: look for a new version about once a day, when Obsidian starts (it only tells you; installing is a tap)
 	lastUpdateCheck: 0,
 	style: 'scrollbar', // 'scrollbar' or 'minimap'
 	thumbWidth: null, // px, visible thumb. null = automatic: 14 on a typical phone, nudged a little up or down with screen size
@@ -47,7 +47,7 @@ const DEFAULTS = {
 	touchButton: true, // show an on/off button in the note header
 	hideScrollbar: false, // long-press the header button to hide / show the whole strip
 	showArrows: true,
-	arrowSize: 36, // px height of each arrow button (also its touch zone)
+	arrowSize: 52, // px height of each arrow button (also its touch zone)
 	stepSize: 120, // px scrolled per arrow tap
 	holdSpeed: 200, // px per second while an arrow is held; slow enough for the eye to follow the text as it moves
 	smooth: true,
@@ -55,6 +55,10 @@ const DEFAULTS = {
 	animateBars: true, // slide/fade the top header and bottom bar while scrolling (with the strip, and Obsidian's own hide-on-scroll)
 	barsMs: 450, // length of that slide, in milliseconds
 	pageBubble: true, // a small circle with the page number pops out of the bar while the note scrolls
+	pageShows: 'page', // what the bubble says: 'page' (3 of 12) or 'percent'
+	pageHapticsBy: 'bubble', // what the buzz counts: 'bubble' (whatever the bubble shows), 'page' or 'percent'
+	arrowTap: 'heading', // what tapping an arrow does: 'step' (scroll Step per tap) or 'heading' (jump to the next or previous heading)
+	pageHaptics: true, // phone or tablet: a light buzz when the page (or, in percent mode, the percent) changes (works with the bubble off too)
 	pageLen: 1800, // how much text is one page, in characters (counted in the note's text, so no screen can change it)
 	barsStyle: 'slide-fade', // 'slide-fade', 'slide' or 'fade'
 	smoothMs: 340, // length of the glide animation
@@ -99,6 +103,8 @@ const MAP_STYLE = {
 	'nm-em': ['#e5c07b', 0.6],
 	'nm-frontmatter': ['#9aa5b1', 0.75],
 };
+
+const CAN_BUZZ = typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function';
 
 const FENCE_RE = /^(```|~~~)/;
 const HEADING_RE = /^#{1,6}\s/;
@@ -426,7 +432,15 @@ class NoteMinimapPlugin extends Plugin {
 		delete this.settings.predraw;
 		delete this.settings.pageIndicator; // removed feature: clear the leftover key
 		delete this.settings.fullscreen; // removed feature: clear the leftover key
-		this.settings.ver = 11;
+		delete this.settings.doubleTapHeading; // removed feature: clear the leftover key
+		// The bubble's 'words' and 'heading' styles were removed: anyone on one of them gets the page number.
+		if (this.settings.pageShows !== 'percent') this.settings.pageShows = 'page';
+		if (!['bubble', 'page', 'percent'].includes(this.settings.pageHapticsBy)) this.settings.pageHapticsBy = 'bubble';
+		if (this.settings.arrowTap !== 'heading') this.settings.arrowTap = 'step';
+		// v12: the arrow buttons are taller (36 -> 52 px), so a single tap lands easily. The old default becomes the
+		// new one; any other size you chose is kept.
+		if ((saved.ver || 1) < 12 && saved.arrowSize === 36) this.settings.arrowSize = DEFAULTS.arrowSize;
+		this.settings.ver = 12;
 		this.states = new Map();
 		this._unloaded = false;
 		this._refreshQueued = false;
@@ -488,9 +502,9 @@ class NoteMinimapPlugin extends Plugin {
 			name: 'Check for updates',
 			callback: async () => {
 				const r = await this.checkForUpdate();
-				if (r === 'available') new Notice('My Note Minimap ' + this._update.version + ' is available. Install it from the plugin settings.');
-				else if (r === 'current') new Notice('My Note Minimap is up to date (' + this.manifest.version + ').');
-				else if (r === 'error') new Notice('My Note Minimap: ' + (this._updMsg || 'could not check for updates.'));
+				if (r === 'available') new Notice('My Note Minimap [Scrollbar] ' + this._update.version + ' is available. Install it from the plugin settings.');
+				else if (r === 'current') new Notice('My Note Minimap [Scrollbar] is up to date (' + this.manifest.version + ').');
+				else if (r === 'error') new Notice('My Note Minimap [Scrollbar]: ' + (this._updMsg || 'could not check for updates.'));
 			},
 		});
 		// Automatic check: a few seconds after start-up, at most once a day, and only a notice, never an install.
@@ -501,7 +515,7 @@ class NoteMinimapPlugin extends Plugin {
 				this._updTimer = null;
 				if (this._unloaded || !this.settings.autoUpdate) return;
 				if ((await this.checkForUpdate()) === 'available' && !this._unloaded) {
-					new Notice('My Note Minimap ' + this._update.version + ' is available. Install it from the plugin settings.', 8000);
+					new Notice('My Note Minimap [Scrollbar] ' + this._update.version + ' is available. Install it from the plugin settings.', 8000);
 				}
 			}, 8000);
 		});
@@ -742,7 +756,7 @@ class NoteMinimapPlugin extends Plugin {
 		}
 		this._updBusy = false;
 		this.flushSave();
-		new Notice('My Note Minimap updated to ' + u.version + '. Reloading the plugin…');
+		new Notice('My Note Minimap [Scrollbar] updated to ' + u.version + '. Reloading the plugin…');
 		const plugins = this.app.plugins;
 		const id = this.manifest.id;
 		window.setTimeout(async () => {
@@ -946,7 +960,7 @@ class NoteMinimapPlugin extends Plugin {
 			document.addEventListener('touchstart', this._touchOn, { passive: true, capture: true });
 			document.addEventListener('wheel', this._touchOn, { passive: true, capture: true });
 		} catch (err) {
-			console.error('My Note Minimap: faster loading could not start', err);
+			console.error('My Note Minimap [Scrollbar]: faster loading could not start', err);
 			this._boost = boost;
 			this._boostBad = true;
 			this.uninstallLoadBoost();
@@ -985,7 +999,7 @@ class NoteMinimapPlugin extends Plugin {
 				else delete MarkdownView.prototype.setViewData;
 			}
 		} catch (e) {
-			console.error('My Note Minimap: could not put loading back', e);
+			console.error('My Note Minimap [Scrollbar]: could not put loading back', e);
 		}
 	}
 
@@ -1078,7 +1092,7 @@ class NoteMinimapPlugin extends Plugin {
 			next();
 		} catch (err) {
 			this._boostBad = true;
-			console.error('My Note Minimap: read-ahead switched off', err);
+			console.error('My Note Minimap [Scrollbar]: read-ahead switched off', err);
 		}
 	}
 
@@ -1105,7 +1119,7 @@ class NoteMinimapPlugin extends Plugin {
 			}
 		} catch (err) {
 			this._boostBad = true;
-			console.error('My Note Minimap: editor draw-ahead switched off', err);
+			console.error('My Note Minimap [Scrollbar]: editor draw-ahead switched off', err);
 		}
 	}
 
@@ -1147,7 +1161,7 @@ class NoteMinimapPlugin extends Plugin {
 					plugin.startPrep();
 				}
 			} catch (err) {
-				console.error('My Note Minimap: start-up preparation failed', err);
+				console.error('My Note Minimap [Scrollbar]: start-up preparation failed', err);
 			}
 			return out;
 		};
@@ -1230,7 +1244,7 @@ class NoteMinimapPlugin extends Plugin {
 			await within(frame().then(frame), Math.min(120, left()));
 			stat.frames = true;
 		} catch (err) {
-			console.error('My Note Minimap: start-up preparation stopped', err);
+			console.error('My Note Minimap [Scrollbar]: start-up preparation stopped', err);
 		}
 		stat.ms = Math.round(performance.now() - t0);
 	}
@@ -2036,8 +2050,11 @@ class NoteMinimapPlugin extends Plugin {
 
 			// Arrow buttons: tap to glide one step, hold to keep scrolling.
 			if (sbMode() && this.settings.showArrows) {
-				if (y < st.arrow) return this.startHold(st, -1);
-				if (y > rect.height - st.arrow) return this.startHold(st, 1);
+				const dir = y < st.arrow ? -1 : y > rect.height - st.arrow ? 1 : 0;
+				if (dir) {
+					st.pressDir = dir;
+					return this.startHold(st, dir);
+				}
 			}
 
 			this.endHold(st);
@@ -2069,6 +2086,7 @@ class NoteMinimapPlugin extends Plugin {
 
 		const stop = (e) => {
 			st.rect = null;
+			st.pressDir = 0;
 			st.dragging = false;
 			el.removeClass('note-minimap-dragging');
 			this.endHold(st, e && e.type);
@@ -2678,9 +2696,14 @@ class NoteMinimapPlugin extends Plugin {
 		const w = Math.min(12, Math.max(9, this.glideOmega()));
 		const mx = st.mx || this.readMetrics(st, true);
 		const max = Math.max(0, mx.sh - mx.ch);
-		const goal = Math.min(max, Math.max(0, st.holdGoal));
+		// A press that lasted half a second is a hold, not a tap: it stops where it carried the note, not at the heading.
+		// (A slower tap used to count as a hold and moved the note only a few pixels.)
+		const held = performance.now() - st.pressT > 500;
+		const goal = st.headTap && held ? st.pos : Math.min(max, Math.max(0, st.holdGoal));
 		const coast = st.pos + v / w; // exactly the distance an exponential stop from speed v takes
-		const target = dir > 0 ? Math.max(goal, coast) : Math.min(goal, coast);
+		let target = dir > 0 ? Math.max(goal, coast) : Math.min(goal, coast);
+		// A tap to a heading ends exactly on it, not past it.
+		if (st.headTap && !held) target = dir > 0 ? Math.max(goal, st.pos) : Math.min(goal, st.pos);
 		st.target = Math.min(max, Math.max(0, target));
 		st.vel = v;
 		st.omega = w;
@@ -2844,6 +2867,54 @@ class NoteMinimapPlugin extends Plugin {
 		else done();
 	}
 
+	// Where the next (dir 1) or previous (dir -1) heading sits, as a scroll position; null if there is none that way.
+	// The headings come from Obsidian's own list for the note. In the reading view the section that holds the heading
+	// says where it is; in the editor the line's block does.
+	arrowHeading(st, dir) {
+		try {
+			const view = st.view;
+			const sc = st.scroller;
+			if (!view || !view.file || !sc) return null;
+			const cache = this.app.metadataCache.getFileCache(view.file);
+			const heads = cache && cache.headings;
+			if (!heads || !heads.length) return null;
+			const mode = st.boundMode === 'preview' ? 'preview' : 'source';
+			const top = this.pageTopLine(st, view, mode, sc);
+			const mx = st.mx || this.readMetrics(st, true);
+			const max = Math.max(0, mx.sh - mx.ch);
+			const here = st.running ? st.target : sc.scrollTop;
+			// Walk the headings in the direction of the tap, starting just past the top of the screen (half a line of room,
+			// so the heading you have just landed on is not picked again). The first one that is a real move away wins;
+			// one that is too close, or that the note cannot be scrolled to, is skipped so a tap never does nothing.
+			const list = dir > 0 ? heads.filter((h) => h.position.start.line > top + 0.5) : heads.filter((h) => h.position.start.line < top - 0.5).reverse();
+			for (const h of list) {
+				const y = this.headingY(view, mode, h.position.start.line);
+				if (y === null) continue;
+				const to = Math.min(max, Math.max(0, y - 6));
+				if ((to - here) * dir >= 24) return to;
+			}
+			return null;
+		} catch (err) {
+			return null;
+		}
+	}
+
+	// Scroll position of a heading's line: the reading view's section that holds it, or the editor's block for the line.
+	headingY(view, mode, line) {
+		if (mode === 'preview') {
+			const r = view.previewMode && view.previewMode.renderer;
+			const secs = r && r.sections;
+			if (!Array.isArray(secs) || typeof r.getSectionTop !== 'function') return null;
+			const sec = secs.find((x) => x.start && x.end && x.shown !== false && x.start.line <= line && x.end.line >= line);
+			const y = sec ? r.getSectionTop(sec) : -1;
+			return y >= 0 ? y : null;
+		}
+		const cm = view.editor && view.editor.cm;
+		if (!cm || !cm.state || line + 1 > cm.state.doc.lines) return null;
+		const pad = cm.documentPadding ? cm.documentPadding.top : 0;
+		return cm.lineBlockAt(cm.state.doc.line(line + 1).from).top + pad;
+	}
+
 	// Scroll by a relative amount; repeated calls add up while a glide is running.
 	nudge(st, delta) {
 		const sc = st.scroller;
@@ -2857,6 +2928,10 @@ class NoteMinimapPlugin extends Plugin {
 		const sc = st.scroller;
 		if (!sc) return;
 		const step = this.settings.stepSize * dir;
+		// With Arrow tap set to a heading, a tap goes to the next or previous heading. A note with none that way
+		// falls back to a plain step. Holding still scrolls (see cruiseToSpring).
+		const headY = this.settings.arrowTap === 'heading' ? this.arrowHeading(st, dir) : null;
+		st.headTap = headY !== null;
 		st.diag = this.settings.diagnostics
 			? { frames: 0, sum: 0, late: 0, lateOurs: 0, lateOther: 0, prevWork: 0, worst: 0, work: 0, workWorst: 0, nudges: 0, nudgePx: 0, jumps: 0, jumpPx: 0, recaptured: 0, why: '', ms: 0, readWorst: 0, readAt: 0, workAt: 0, lateAt: [], peeks: 0, redrew: 0, peekMs: 0, peekWorst: 0, vdN: 0, vdMs: 0, vdWorst: 0, rnN: 0, rnMs: 0, rnWorst: 0, rgN: 0 }
 			: null;
@@ -2877,7 +2952,7 @@ class NoteMinimapPlugin extends Plugin {
 
 		if (!this.settings.smooth) {
 			// No animation: step now, then repeat while the finger stays down.
-			this.nudge(st, step);
+			this.nudge(st, headY !== null ? headY - sc.scrollTop : step);
 			st.repeatTimer = setTimeout(() => {
 				st.repeat = setInterval(() => this.nudge(st, step * 0.4), 90);
 			}, 350);
@@ -2896,7 +2971,7 @@ class NoteMinimapPlugin extends Plugin {
 		const mx = this.readMetrics(st, true);
 		if (!moving) this.engineStart(st);
 		st.pos = base;
-		st.holdGoal = (moving ? st.target : base) + step;
+		st.holdGoal = headY !== null ? headY : (moving ? st.target : base) + step;
 		st.hold = dir;
 		st.holdT = 0;
 		st.cv0 = v0;
@@ -2919,6 +2994,7 @@ class NoteMinimapPlugin extends Plugin {
 		st.repeat = null;
 
 		if (st.cruise) this.cruiseToSpring(st); // the spring then eases the note to a soft stop
+		st.headTap = false;
 		st.hold = 0;
 		if (st.diag) this.reportDiag(st);
 		this.releasePress(st);
@@ -3363,6 +3439,12 @@ class NoteMinimapPlugin extends Plugin {
 		return cm.state.doc.lineAt(blk.from).number - 1;
 	}
 
+	// What the buzz counts: the same as the bubble unless Page vibration has its own choice.
+	hapMode() {
+		const by = this.settings.pageHapticsBy || 'bubble';
+		return by === 'bubble' ? this.settings.pageShows || 'page' : by;
+	}
+
 	pageInfo(st) {
 		try {
 			const view = st.view;
@@ -3376,8 +3458,14 @@ class NoteMinimapPlugin extends Plugin {
 			const per = Math.max(300, this.settings.pageLen || 1800);
 			const total = Math.max(1, Math.ceil(cum[lines] / per));
 			let page = Math.floor(cum[line] / per) + 1;
-			if (sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 2) page = total; // the very end is the last page
-			return { page: Math.max(1, Math.min(total, page)), total };
+			const atEnd = sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 2;
+			if (atEnd) page = total; // the very end is the last page
+			const info = { page: Math.max(1, Math.min(total, page)), total };
+			const modes = [this.settings.pageBubble !== false ? this.settings.pageShows : null, this.settings.pageHaptics !== false ? this.hapMode() : null];
+			if (modes.includes('percent')) {
+				info.pct = atEnd ? 100 : Math.max(0, Math.min(100, Math.round((cum[line] / Math.max(1, cum[lines])) * 100)));
+			}
+			return info;
 		} catch (err) {
 			return null;
 		}
@@ -3385,7 +3473,9 @@ class NoteMinimapPlugin extends Plugin {
 
 	// Called every time the thumb is placed. A change of position of more than a pixel or two is a scroll.
 	pageTick(st, vpTop, vpH) {
-		if (!this.settings.pageBubble || st.dead) return;
+		const bub = this.settings.pageBubble;
+		const hap = this.settings.pageHaptics && CAN_BUZZ && Platform.isMobile;
+		if ((!bub && !hap) || st.dead) return;
 		const y = st.pageY;
 		if (y === undefined) return;
 		const now = performance.now();
@@ -3404,12 +3494,39 @@ class NoteMinimapPlugin extends Plugin {
 		if (Math.abs(y - st.pageSeen) >= 2) {
 			st.pageSeen = y;
 			if (!st.noScroll && now > (st.pageQuiet || 0) && now > (this._pageQuiet || 0)) {
+				const rested = now - (st.pageLastMove || 0) > 600;
 				st.pageLastMove = now;
-				if (st.pageFading) this.pageKeep(st);
-				else if (!st.pageOn) this.pageShow(st, vpTop, vpH);
+				if (bub) {
+					if (st.pageFading) this.pageKeep(st);
+					else if (!st.pageOn) this.pageShow(st, vpTop, vpH);
+				}
+				if (hap) this.pageBuzz(st, now, rested);
 			}
 		}
-		if (st.pageOn) this.pageMove(st, vpTop, vpH, now, false);
+		if (bub && st.pageOn) this.pageMove(st, vpTop, vpH, now, false);
+	}
+
+	// A short buzz each time the scroll crosses into another page (or, when the bubble shows percent, each time the
+	// percent changes). After a pause the first move only notes where you are, so starting to scroll never buzzes by itself.
+	pageBuzz(st, now, rested) {
+		if (rested) st.hapPage = null;
+		if (now - (st.hapT || 0) < 70) return;
+		st.hapT = now;
+		const info = this.pageInfo(st);
+		if (!info) return;
+		// What is being counted: whole percents in percent mode, pages otherwise. The prefix tells the two apart,
+		// so switching the setting just starts counting again instead of buzzing once.
+		const hm = this.hapMode();
+		const key = hm === 'percent' && info.pct !== undefined ? 'p' + info.pct : 'n' + info.page;
+		const prev = st.hapPage;
+		if (typeof prev === 'string' && prev.charAt(0) === key.charAt(0) && prev !== key) {
+			try {
+				navigator.vibrate(12);
+			} catch (e) {
+				/* not supported here */
+			}
+		}
+		st.hapPage = key;
 	}
 
 	pageShow(st, vpTop, vpH) {
@@ -3455,7 +3572,7 @@ class NoteMinimapPlugin extends Plugin {
 		st.pageHostH = hr.height;
 		st.pageSize = size;
 		st.pageTxt = null;
-		st.pageTot = null;
+		st.pageSub = null;
 		st.pageY0 = null;
 		this.pageSet(st, info, false);
 		this.pageMove(st, vpTop, vpH, performance.now(), true);
@@ -3520,15 +3637,23 @@ class NoteMinimapPlugin extends Plugin {
 	}
 
 	pageSet(st, info, animate) {
-		const t = String(info.page);
+		const mode = this.settings.pageShows || 'page';
+		let t;
+		let sub = '';
+		if (mode === 'percent' && info.pct !== undefined) t = info.pct + '%';
+		else {
+			t = String(info.page);
+			sub = 'of ' + info.total;
+		}
 		const changed = st.pageTxt !== t;
 		if (changed) {
 			st.pageTxt = t;
 			st.pageNum.textContent = t;
 		}
-		if (st.pageTot !== info.total) {
-			st.pageTot = info.total;
-			st.pageOf.textContent = 'of ' + info.total;
+		if (st.pageSub !== sub) {
+			st.pageSub = sub;
+			st.pageOf.textContent = sub;
+			st.pageOf.style.display = sub ? '' : 'none';
 		}
 		const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 		if (animate && changed && !reduced && st.pageNum.animate) {
@@ -3696,7 +3821,7 @@ class RefreshRateModal extends Modal {
 		this.showCurrent();
 		contentEl.createEl('p', {
 			cls: 'nm-hz-note',
-			text: 'Not sure? Leave it on Automatic. You can change this any time under Settings → My Note Minimap → Screen refresh rate.',
+			text: 'Not sure? Leave it on Automatic. You can change this any time under Settings → My Note Minimap [Scrollbar] → Screen refresh rate.',
 		});
 	}
 
@@ -3968,7 +4093,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Check for updates automatically')
-			.setDesc('Looks for a new version about once a day when Obsidian starts and shows a notice if there is one. It never installs by itself.')
+			.setDesc('Off by default. When on, contacts api.github.com about once a day when Obsidian starts to look for a newer release, and shows a notice if there is one. It never installs by itself.')
 			.addToggle((t) =>
 				t.setValue(p.settings.autoUpdate).onChange(async (v) => {
 					p.settings.autoUpdate = v;
@@ -3979,10 +4104,17 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		const updRow = new Setting(containerEl).setName('Version ' + p.manifest.version);
 		let updBtn = null;
+		let spinEl = null;
+		let spinTimer = null;
+		const stopSpin = () => {
+			if (spinTimer) window.clearInterval(spinTimer);
+			spinTimer = null;
+			spinEl = null;
+		};
 		const paintUpdate = () => {
 			const st = p._updState;
 			const u = p._update;
-			let desc = 'Check GitHub for a newer version.';
+			let desc = 'Contacts api.github.com only when you tap the button. Installing then downloads the release files from github.com.';
 			if (p.settings.lastUpdateCheck) desc = 'Last checked ' + new Date(p.settings.lastUpdateCheck).toLocaleString() + '.';
 			if (st === 'checking') desc = 'Checking…';
 			else if (st === 'installing') desc = 'Downloading and installing ' + (u ? u.version : '') + '…';
@@ -3992,13 +4124,38 @@ class MinimapSettingTab extends PluginSettingTab {
 			updRow.setDesc(desc);
 			if (!updBtn) return;
 			const busy = st === 'checking' || st === 'installing';
-			updBtn.setDisabled(busy);
+			// Not setDisabled(): a disabled button gets a spinning loader from Obsidian, and that animated layer made the
+			// black area behind the modal's rounded corners flash while checking. The button stays enabled but inert
+			// (onClick ignores taps while busy), and a plain class dims it instead.
+			updBtn.buttonEl.toggleClass('nm-upd-busy', busy);
 			updBtn.setButtonText(u ? 'Update to ' + u.version : 'Check for updates');
+			// While it runs, show a small rolling ring in place of the label. It is drawn as text frames swapped from
+			// script, NOT a CSS animation: any continuously animated layer inside the modal made the area behind its
+			// rounded corners flash black on Android, and Obsidian's own disabled-button loader did the same.
+			if (busy) {
+				if (!spinEl || !spinEl.isConnected) {
+					updBtn.buttonEl.empty();
+					spinEl = updBtn.buttonEl.createSpan({ cls: 'nm-upd-spin' });
+				}
+				if (!spinTimer) {
+					let i = 0;
+					const frames = ['\u280B', '\u2819', '\u2839', '\u2838', '\u283C', '\u2834', '\u2826', '\u2827', '\u2807', '\u280F'];
+					const tick = () => {
+						if (!spinEl || !spinEl.isConnected) return stopSpin();
+						spinEl.setText(frames[i++ % frames.length]);
+					};
+					tick();
+					spinTimer = window.setInterval(tick, 90);
+				}
+			} else {
+				stopSpin();
+			}
 			if (u) updBtn.setCta();
 			else updBtn.removeCta();
 		};
 		updRow.addButton((b) => {
 			updBtn = b;
+			b.buttonEl.addClass('nm-upd-btn');
 			b.onClick(async () => {
 				if (p._updBusy) return;
 				const run = p._update ? p.installUpdate() : p.checkForUpdate();
@@ -4120,7 +4277,48 @@ class MinimapSettingTab extends PluginSettingTab {
 			);
 		containerEl.insertBefore(pageWrap, null); // keeps the row right under the toggle
 
+		new Setting(pageInner)
+			.setName('Bubble shows')
+			.setDesc('What the bubble says. Page number: 3 of 12. Percent read: how far through the note you are.')
+			.addDropdown((d) =>
+				d
+					.addOption('page', 'Page number')
+					.addOption('percent', 'Percent read')
+					.setValue(p.settings.pageShows || 'page')
+					.onChange(async (v) => {
+						p.settings.pageShows = v;
+						await p.saveSettings();
+					})
+			);
 		slider('Page length', 'How much text is one page, in characters. Counted in the text, so rotating or unfolding never changes it.', 'pageLen', 600, 4000, 100, undefined, pageInner);
+
+		if (Platform.isMobile) {
+			new Setting(containerEl)
+				.setName('Page vibration')
+				.setDesc('A light buzz as you scroll through the note. Works even with the bubble off.')
+				.addToggle((t) =>
+					t.setValue(p.settings.pageHaptics !== false).onChange(async (v) => {
+						p.settings.pageHaptics = v;
+						this.setFold(hapFold.wrap, v);
+						await p.saveSettings();
+					})
+				);
+			const hapFold = fold(p.settings.pageHaptics !== false);
+			new Setting(hapFold.inner)
+				.setName('Buzz on')
+				.setDesc('What the buzz counts. Each page: a buzz for every new page. Each percent: a buzz for every new percent.')
+				.addDropdown((d) =>
+					d
+						.addOption('bubble', 'Same as the bubble')
+						.addOption('page', 'Each page')
+						.addOption('percent', 'Each percent')
+						.setValue(p.settings.pageHapticsBy || 'bubble')
+						.onChange(async (v) => {
+							p.settings.pageHapticsBy = v;
+							await p.saveSettings();
+						})
+				);
+		}
 
 		styleFolds.sb = fold(p.settings.style === 'scrollbar');
 		host = styleFolds.sb.inner;
@@ -4243,7 +4441,25 @@ class MinimapSettingTab extends PluginSettingTab {
 
 			const arrowFold = fold(p.settings.showArrows);
 			slider('Arrow size', 'How big each arrow button is, in pixels.', 'arrowSize', 14, 80, 1, undefined, arrowFold.inner);
-			slider('Step per tap', 'How far one tap scrolls, in pixels.', 'stepSize', 40, 600, 10, undefined, arrowFold.inner);
+			new Setting(arrowFold.inner)
+				.setName('Arrow tap does')
+				.setDesc('Scroll a step: a tap moves the note a fixed distance. Jump to heading: a tap goes to the next or previous heading. Holding always scrolls.')
+				.addDropdown((d) =>
+					d
+						.addOption('step', 'Scroll a step')
+						.addOption('heading', 'Jump to heading')
+						.setValue(p.settings.arrowTap === 'heading' ? 'heading' : 'step')
+						.onChange(async (v) => {
+							p.settings.arrowTap = v;
+							this.setFold(stepFold.wrap, v === 'step');
+							await p.saveSettings();
+						})
+				);
+			const outer = host;
+			host = arrowFold.inner;
+			const stepFold = fold(p.settings.arrowTap !== 'heading');
+			host = outer;
+			slider('Step per tap', 'How far one tap scrolls, in pixels.', 'stepSize', 40, 600, 10, undefined, stepFold.inner);
 			slider('Hold speed', 'How fast the note scrolls while you hold an arrow. Higher is faster.', 'holdSpeed', 100, 4000, 20, undefined, arrowFold.inner);
 		}
 		host = containerEl;
@@ -4902,7 +5118,7 @@ class MinimapSettingTab extends PluginSettingTab {
 		try {
 			groups = collectSwatchGroups(inner);
 		} catch (e) {
-			console.error('My Note Minimap: could not read theme colours', e);
+			console.error('My Note Minimap [Scrollbar]: could not read theme colours', e);
 		}
 
 		for (const g of groups) {
