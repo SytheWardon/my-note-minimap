@@ -502,9 +502,9 @@ class NoteMinimapPlugin extends Plugin {
 			name: 'Check for updates',
 			callback: async () => {
 				const r = await this.checkForUpdate();
-				if (r === 'available') new Notice('My Note Minimap [Scrollbar] ' + this._update.version + ' is available. Install it from the plugin settings.');
-				else if (r === 'current') new Notice('My Note Minimap [Scrollbar] is up to date (' + this.manifest.version + ').');
-				else if (r === 'error') new Notice('My Note Minimap [Scrollbar]: ' + (this._updMsg || 'could not check for updates.'));
+				if (r === 'available') new Notice('My Note Minimap ' + this._update.version + ' is available. Install it from the plugin settings.');
+				else if (r === 'current') new Notice('My Note Minimap is up to date (' + this.manifest.version + ').');
+				else if (r === 'error') new Notice('My Note Minimap: ' + (this._updMsg || 'could not check for updates.'));
 			},
 		});
 		// Automatic check: a few seconds after start-up, at most once a day, and only a notice, never an install.
@@ -515,7 +515,7 @@ class NoteMinimapPlugin extends Plugin {
 				this._updTimer = null;
 				if (this._unloaded || !this.settings.autoUpdate) return;
 				if ((await this.checkForUpdate()) === 'available' && !this._unloaded) {
-					new Notice('My Note Minimap [Scrollbar] ' + this._update.version + ' is available. Install it from the plugin settings.', 8000);
+					new Notice('My Note Minimap ' + this._update.version + ' is available. Install it from the plugin settings.', 8000);
 				}
 			}, 8000);
 		});
@@ -756,7 +756,7 @@ class NoteMinimapPlugin extends Plugin {
 		}
 		this._updBusy = false;
 		this.flushSave();
-		new Notice('My Note Minimap [Scrollbar] updated to ' + u.version + '. Reloading the plugin…');
+		new Notice('My Note Minimap updated to ' + u.version + '. Reloading the plugin…');
 		const plugins = this.app.plugins;
 		const id = this.manifest.id;
 		window.setTimeout(async () => {
@@ -960,7 +960,7 @@ class NoteMinimapPlugin extends Plugin {
 			document.addEventListener('touchstart', this._touchOn, { passive: true, capture: true });
 			document.addEventListener('wheel', this._touchOn, { passive: true, capture: true });
 		} catch (err) {
-			console.error('My Note Minimap [Scrollbar]: faster loading could not start', err);
+			console.error('My Note Minimap: faster loading could not start', err);
 			this._boost = boost;
 			this._boostBad = true;
 			this.uninstallLoadBoost();
@@ -999,7 +999,7 @@ class NoteMinimapPlugin extends Plugin {
 				else delete MarkdownView.prototype.setViewData;
 			}
 		} catch (e) {
-			console.error('My Note Minimap [Scrollbar]: could not put loading back', e);
+			console.error('My Note Minimap: could not put loading back', e);
 		}
 	}
 
@@ -1092,7 +1092,7 @@ class NoteMinimapPlugin extends Plugin {
 			next();
 		} catch (err) {
 			this._boostBad = true;
-			console.error('My Note Minimap [Scrollbar]: read-ahead switched off', err);
+			console.error('My Note Minimap: read-ahead switched off', err);
 		}
 	}
 
@@ -1119,7 +1119,7 @@ class NoteMinimapPlugin extends Plugin {
 			}
 		} catch (err) {
 			this._boostBad = true;
-			console.error('My Note Minimap [Scrollbar]: editor draw-ahead switched off', err);
+			console.error('My Note Minimap: editor draw-ahead switched off', err);
 		}
 	}
 
@@ -1161,7 +1161,7 @@ class NoteMinimapPlugin extends Plugin {
 					plugin.startPrep();
 				}
 			} catch (err) {
-				console.error('My Note Minimap [Scrollbar]: start-up preparation failed', err);
+				console.error('My Note Minimap: start-up preparation failed', err);
 			}
 			return out;
 		};
@@ -1244,7 +1244,7 @@ class NoteMinimapPlugin extends Plugin {
 			await within(frame().then(frame), Math.min(120, left()));
 			stat.frames = true;
 		} catch (err) {
-			console.error('My Note Minimap [Scrollbar]: start-up preparation stopped', err);
+			console.error('My Note Minimap: start-up preparation stopped', err);
 		}
 		stat.ms = Math.round(performance.now() - t0);
 	}
@@ -3821,7 +3821,7 @@ class RefreshRateModal extends Modal {
 		this.showCurrent();
 		contentEl.createEl('p', {
 			cls: 'nm-hz-note',
-			text: 'Not sure? Leave it on Automatic. You can change this any time under Settings → My Note Minimap [Scrollbar] → Screen refresh rate.',
+			text: 'Not sure? Leave it on Automatic. You can change this any time under Settings → My Note Minimap → Screen refresh rate.',
 		});
 	}
 
@@ -5118,7 +5118,7 @@ class MinimapSettingTab extends PluginSettingTab {
 		try {
 			groups = collectSwatchGroups(inner);
 		} catch (e) {
-			console.error('My Note Minimap [Scrollbar]: could not read theme colours', e);
+			console.error('My Note Minimap: could not read theme colours', e);
 		}
 
 		for (const g of groups) {

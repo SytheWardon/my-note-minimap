@@ -76,7 +76,7 @@ Pages are counted in the note's **text**, not screen heights, so rotating, unfol
 
 ## Settings reference
 
-Open **Settings → My Note Minimap [Scrollbar]**. The sections below follow the order on the settings page. Where a row only appears under certain conditions, that is noted. Sliders have **− and + buttons** (hold to repeat) and always show the current value; a **reset** button on a group puts its sliders back to default with a short glide. Rows that depend on a toggle fold open and shut smoothly.
+Open **Settings → My Note Minimap**. The sections below follow the order on the settings page. Where a row only appears under certain conditions, that is noted. Sliders have **− and + buttons** (hold to repeat) and always show the current value; a **reset** button on a group puts its sliders back to default with a short glide. Rows that depend on a toggle fold open and shut smoothly.
 
 ### Updates
 
@@ -239,8 +239,7 @@ Nothing is sent about you or your notes, and nothing else leaves your device. No
 
 ## Version history
 
-- **4.4.0:** Notices and console messages use the full name, *My Note Minimap [Scrollbar]*.
-- **4.3.9:** The plugin is now named *My Note Minimap [Scrollbar]* in Obsidian's plugin list and settings (its ID is unchanged, so your settings carry over).
+- **4.5.0:** Plugin name, notices and log messages are back to *My Note Minimap* (the *[Scrollbar]* name tried in 4.3.9 and 4.4.0 is removed). No other change.
 - **4.3.8:** *Arrow tap does* now defaults to *Jump to heading*. Arrow buttons are taller by default (*Arrow size* 52 px, was 36) so a single tap lands easily; the old default is upgraded once, a size you chose yourself is kept. *Check for updates* no longer makes the area behind the settings window's rounded corners flash black while it checks: the button is no longer disabled, and a small ring turns in it instead. README now lists every setting.
 - **4.3.1:** Fixed *Jump to heading*: a tap that lasted a little long counted as a hold and moved the note only a few pixels, so the arrow seemed to do nothing. A press now has to last half a second to count as a hold, and a heading that is too close to move to is skipped for the next one (or a normal step). *Words read* is removed from *Bubble shows* and *Buzz on*.
 - **4.3.0:** *Arrow tap does* is a new choice that replaces the old double-tap: *Scroll a step* (with *Step per tap*, which now shows only for this choice) or *Jump to heading*. *Page vibration* has a *Buzz on* choice (same as the bubble, each page, or each percent), so it works with percent with or without the bubble.
