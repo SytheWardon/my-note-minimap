@@ -20,7 +20,7 @@ const UPDATE_EVERY_MS = 24 * 60 * 60 * 1000; // the automatic check runs at most
 // The version of this code. It travels inside main.js, so it is always the version that is actually running (Obsidian
 // only reads manifest.json at start-up, and reading it from disk ourselves caused a hitch). Keep it equal to the
 // version in manifest.json; the release workflow refuses to publish if they differ.
-const PLUGIN_VERSION = '4.5.5';
+const PLUGIN_VERSION = '4.6.0';
 
 // 1 if version a is newer than b, -1 if older, 0 if the same ("1.2.3" style, a leading "v" is ignored).
 function cmpVer(a, b) {
@@ -754,19 +754,12 @@ class NoteMinimapPlugin extends Plugin {
 			if (man.id !== this.manifest.id || man.version !== u.version) throw new Error('The release files do not match its version.');
 			if (js.length < 1000 || !js.includes('NoteMinimapPlugin')) throw new Error('The downloaded main.js looks incomplete.');
 			if (!js.includes("const PLUGIN_VERSION = '" + u.version + "'")) throw new Error('The downloaded main.js is not version ' + u.version + '.');
+			if (css.length < 200 || !css.includes('.note-minimap')) throw new Error('The downloaded styles.css looks incomplete.');
 			const ad = this.app.vault.adapter;
 			const dir = this.manifest.dir;
 			await ad.write(dir + '/styles.css', css);
 			await ad.write(dir + '/manifest.json', manifestTxt);
 			await ad.write(dir + '/main.js', js); // last, so the code only changes once everything else is in place
-			// Obsidian keeps its own copy of every plugin's manifest from start-up and builds its plugin list (and the
-			// reloaded plugin's this.manifest) from it. Hand it the new one so it stops showing the old version.
-			try {
-				const mf = this.app.plugins && this.app.plugins.manifests;
-				if (mf && mf[this.manifest.id]) mf[this.manifest.id] = Object.assign({}, mf[this.manifest.id], man, { dir });
-			} catch (e) {
-				// cosmetic only: a restart refreshes it
-			}
 		} catch (e) {
 			this._updBusy = false;
 			this._updState = 'error';
@@ -929,7 +922,7 @@ class NoteMinimapPlugin extends Plugin {
 				proto.setViewData = function (data, clear) {
 					let undo = null;
 					try {
-						if (clear && !plugin._boostBad && plugin.settings.holdLite) {
+						if (clear && plugin._boost && !plugin._boostBad && plugin.settings.holdLite) {
 							const pm = this.modes && this.modes.preview;
 							if (pm && this.currentMode && this.currentMode !== pm && typeof pm.clear === 'function') {
 								const own = hasOwn(pm, 'set');
@@ -962,6 +955,8 @@ class NoteMinimapPlugin extends Plugin {
 				};
 			}
 			this._boost = boost;
+			boost.wrapRead = boost.origRead ? vault.read : null;
+			boost.wrapSet = boost.origSet ? MarkdownView.prototype.setViewData : null;
 			// Any change to a note drops our own copy of it.
 			const drop = (f, old) => {
 				if (f && f.path) this._big.delete(f.path);
@@ -1009,11 +1004,12 @@ class NoteMinimapPlugin extends Plugin {
 		if (this._big) this._big.clear();
 		if (!boost) return;
 		try {
-			if (boost.origRead) {
+			// (wrapRead / wrapSet are unset only when starting up failed half way: then both are put back as before.)
+			if (boost.origRead && (boost.wrapRead === undefined || this.app.vault.read === boost.wrapRead)) {
 				if (boost.ownRead) this.app.vault.read = boost.origRead;
 				else delete this.app.vault.read;
 			}
-			if (boost.origSet) {
+			if (boost.origSet && (boost.wrapSet === undefined || MarkdownView.prototype.setViewData === boost.wrapSet)) {
 				if (boost.ownSet) MarkdownView.prototype.setViewData = boost.origSet;
 				else delete MarkdownView.prototype.setViewData;
 			}
@@ -1024,7 +1020,7 @@ class NoteMinimapPlugin extends Plugin {
 
 	// Which notes the faster loading may touch: ordinary notes that are not being written right now.
 	boostFile(file) {
-		return !this._boostBad && this.settings.holdLite && !!file && file.extension === 'md' && !file.saving && !!file.stat;
+		return !!this._boost && !this._boostBad && this.settings.holdLite && !!file && file.extension === 'md' && !file.saving && !!file.stat;
 	}
 
 	statKey(file) {
@@ -1184,6 +1180,7 @@ class NoteMinimapPlugin extends Plugin {
 			}
 			return out;
 		};
+		this._prepHook.wrap = ws.loadLayout;
 	}
 
 	removeStartHook() {
@@ -1193,6 +1190,7 @@ class NoteMinimapPlugin extends Plugin {
 		if (!h) return;
 		this._prepHook = null;
 		try {
+			if (this.app.workspace.loadLayout !== h.wrap) return; // wrapped again since: ours passes through
 			if (h.own) this.app.workspace.loadLayout = h.orig;
 			else delete this.app.workspace.loadLayout;
 		} catch (e) {}
@@ -1357,7 +1355,7 @@ class NoteMinimapPlugin extends Plugin {
 			}
 			return orig.apply(this, args);
 		};
-		st.rgOn = { r, orig, own, secs };
+		st.rgOn = { r, orig, own, secs, wrap: r.queueRender };
 	}
 
 	ungateRender(st, quick) {
@@ -1366,8 +1364,10 @@ class NoteMinimapPlugin extends Plugin {
 			st.rgOn = null;
 			st.rgR = g.r; // kept so the drawing that was held back can still be carried on afterwards
 			try {
-				if (g.own) g.r.queueRender = g.orig;
-				else delete g.r.queueRender;
+				if (g.r.queueRender === g.wrap) {
+					if (g.own) g.r.queueRender = g.orig;
+					else delete g.r.queueRender;
+				}
 			} catch (e) {}
 		}
 		if (!st.rgPending) return;
@@ -1445,7 +1445,7 @@ class NoteMinimapPlugin extends Plugin {
 					}
 				}
 			};
-			return { name, orig, own };
+			return { name, orig, own, mine: r[name] };
 		};
 		st.vdWrap = {
 			r,
@@ -1460,8 +1460,10 @@ class NoteMinimapPlugin extends Plugin {
 			st.vdWrap = null;
 			for (const x of w.list) {
 				try {
-					if (x.own) w.r[x.name] = x.orig;
-					else delete w.r[x.name];
+					if (w.r[x.name] === x.mine) {
+						if (x.own) w.r[x.name] = x.orig;
+						else delete w.r[x.name];
+					}
 				} catch (e) {}
 			}
 		}
@@ -2173,6 +2175,11 @@ class NoteMinimapPlugin extends Plugin {
 		if (st.pageTimer) clearTimeout(st.pageTimer);
 		if (st.pageFadeTimer) clearTimeout(st.pageFadeTimer);
 		if (st.pageClearTimer) clearTimeout(st.pageClearTimer);
+		if (st.pwTimer) {
+			if (typeof window.cancelIdleCallback === 'function') window.cancelIdleCallback(st.pwTimer);
+			clearTimeout(st.pwTimer);
+			st.pwTimer = null;
+		}
 		if (st.pageEl) st.pageEl.remove();
 		st.el.remove();
 		st.host.removeClass('note-minimap-host', 'note-minimap-pad-left', 'note-minimap-pad-right');
@@ -3388,53 +3395,97 @@ class NoteMinimapPlugin extends Plugin {
 	// place), and one page is `pageLen` of that. The page you are on is the one holding the line at the top of the
 	// screen; the editor and the reading view are each asked for that line in their own way (Obsidian's reading view
 	// keeps the first and last line of every section, the editor can say which line sits at a given height).
+	// What the cached line-weight table belongs to: the note's text itself (a string in the reading view, the editor's
+	// immutable document in the editor). Null when there is nothing to count yet.
+	pageKey(view, mode) {
+		if (mode === 'preview') return typeof view.data === 'string' ? view.data : '';
+		const cm = view.editor && view.editor.cm;
+		if (!cm || !cm.state) return null;
+		return cm.state.doc;
+	}
+
+	// Same numbers as always (cum[i] = the weight of every line before line i); they are just written into a table of
+	// the right size from the start instead of a list that grows line by line.
 	pageModel(st, view, mode) {
-		let key;
-		let build;
-		if (mode === 'preview') {
-			key = typeof view.data === 'string' ? view.data : '';
-			build = () => {
-				const n = key.length;
-				const cum = [0];
-				let i = 0;
-				while (i <= n) {
-					let j = key.indexOf('\n', i);
-					if (j < 0) j = n;
-					cum.push(cum[cum.length - 1] + Math.max(PAGE_MIN, j - i + 1));
-					i = j + 1;
-				}
-				return cum;
-			};
-		} else {
-			const cm = view.editor && view.editor.cm;
-			if (!cm || !cm.state) return null;
-			const doc = cm.state.doc;
-			key = doc;
-			build = () => {
-				const cum = [0];
-				if (typeof doc.iterLines === 'function') {
-					for (const ln of doc.iterLines()) cum.push(cum[cum.length - 1] + Math.max(PAGE_MIN, ln.length + 1));
-				} else {
-					for (let i = 1; i <= doc.lines; i++) cum.push(cum[cum.length - 1] + Math.max(PAGE_MIN, doc.line(i).length + 1));
-				}
-				return cum;
-			};
-		}
+		const key = this.pageKey(view, mode);
+		if (key === null) return null;
 		const m = st.pm;
 		if (m && m.key === key && m.mode === mode) return m.cum;
-		const cum = build();
+		let cum;
+		if (mode === 'preview') {
+			const n = key.length;
+			// One entry per line: a note with k line breaks has k + 1 lines (the empty one after a last break counts).
+			let breaks = 0;
+			for (let b = key.indexOf('\n'); b >= 0; b = key.indexOf('\n', b + 1)) breaks++;
+			cum = new Float64Array(breaks + 2);
+			let k = 0;
+			let i = 0;
+			while (i <= n) {
+				let j = key.indexOf('\n', i);
+				if (j < 0) j = n;
+				const w = j - i + 1;
+				cum[k + 1] = cum[k] + (w > PAGE_MIN ? w : PAGE_MIN);
+				k++;
+				i = j + 1;
+			}
+		} else {
+			const doc = key;
+			cum = new Float64Array(doc.lines + 1);
+			let k = 0;
+			if (typeof doc.iterLines === 'function') {
+				for (const ln of doc.iterLines()) {
+					const w = ln.length + 1;
+					cum[k + 1] = cum[k] + (w > PAGE_MIN ? w : PAGE_MIN);
+					k++;
+				}
+			} else {
+				for (let i = 1; i <= doc.lines; i++) {
+					const w = doc.line(i).length + 1;
+					cum[k + 1] = cum[k] + (w > PAGE_MIN ? w : PAGE_MIN);
+					k++;
+				}
+			}
+			if (k !== doc.lines) cum = cum.slice(0, k + 1);
+		}
 		st.pm = { key, mode, cum };
 		return cum;
 	}
 
+	// Builds the table while the app is idle, so the first scroll after opening or editing a note does not have to.
+	// It only fills the same cache pageModel fills; if it has not run yet, pageModel builds it on the spot as before.
+	pageWarm(st) {
+		if (st.pwTimer || st.dead) return;
+		const run = () => {
+			st.pwTimer = null;
+			if (st.dead || !st.view || !st.scroller) return;
+			try {
+				this.pageModel(st, st.view, st.boundMode === 'preview' ? 'preview' : 'source');
+			} catch (err) {
+				/* it will be built when it is first needed */
+			}
+		};
+		st.pwTimer = typeof window.requestIdleCallback === 'function' ? window.requestIdleCallback(run, { timeout: 1500 }) : window.setTimeout(run, 250);
+	}
+
+	// Is the cached table out of date for the note as it is now? (Cheap: compares the cache key only.)
+	pageStale(st) {
+		const view = st.view;
+		if (!view || !st.scroller) return false;
+		const mode = st.boundMode === 'preview' ? 'preview' : 'source';
+		const key = this.pageKey(view, mode);
+		if (key === null) return false;
+		const m = st.pm;
+		return !(m && m.key === key && m.mode === mode);
+	}
+
 	// The source line (a fraction, in the reading view) at the top of the screen.
-	pageTopLine(st, view, mode, sc) {
+	pageTopLine(st, view, mode, sc, scrollTop) {
+		const y = scrollTop === undefined ? sc.scrollTop : scrollTop; // read once by the caller when it already has it
 		if (mode === 'preview') {
 			const r = view.previewMode && view.previewMode.renderer;
 			const secs = r && r.sections;
 			if (!Array.isArray(secs) || !secs.length) return 0;
 			// Same walk Obsidian uses to place its sections (getSectionTop): heights not measured yet are guessed.
-			const y = sc.scrollTop;
 			let acc = 0;
 			let best = null;
 			let bestTop = 0;
@@ -3454,7 +3505,7 @@ class NoteMinimapPlugin extends Plugin {
 		}
 		const cm = view.editor && view.editor.cm;
 		const pad = cm.documentPadding ? cm.documentPadding.top : 0;
-		const blk = cm.lineBlockAtHeight(Math.max(0, sc.scrollTop - pad));
+		const blk = cm.lineBlockAtHeight(Math.max(0, y - pad));
 		return cm.state.doc.lineAt(blk.from).number - 1;
 	}
 
@@ -3465,6 +3516,15 @@ class NoteMinimapPlugin extends Plugin {
 	}
 
 	pageInfo(st) {
+		// The page bubble, the buzz and the first show all ask in the same tick, about the same scroll position:
+		// work it out once (pageTick clears this at the start of every tick).
+		if (st.piM) return st.piM.info;
+		const info = this.pageInfoCalc(st);
+		st.piM = { info };
+		return info;
+	}
+
+	pageInfoCalc(st) {
 		try {
 			const view = st.view;
 			const sc = st.scroller;
@@ -3473,16 +3533,19 @@ class NoteMinimapPlugin extends Plugin {
 			const cum = this.pageModel(st, view, mode);
 			if (!cum || cum.length < 2) return null;
 			const lines = cum.length - 1;
-			const line = Math.max(0, Math.min(lines - 1, Math.floor(this.pageTopLine(st, view, mode, sc))));
+			// The three layout reads together, once (they were read separately, the scroll position twice over).
+			const top = sc.scrollTop;
+			const atEnd = top + sc.clientHeight >= sc.scrollHeight - 2;
+			const line = Math.max(0, Math.min(lines - 1, Math.floor(this.pageTopLine(st, view, mode, sc, top))));
+			const total0 = cum[lines];
 			const per = Math.max(300, this.settings.pageLen || 1800);
-			const total = Math.max(1, Math.ceil(cum[lines] / per));
+			const total = Math.max(1, Math.ceil(total0 / per));
 			let page = Math.floor(cum[line] / per) + 1;
-			const atEnd = sc.scrollTop + sc.clientHeight >= sc.scrollHeight - 2;
 			if (atEnd) page = total; // the very end is the last page
 			const info = { page: Math.max(1, Math.min(total, page)), total };
-			const modes = [this.settings.pageBubble !== false ? this.settings.pageShows : null, this.settings.pageHaptics !== false ? this.hapMode() : null];
-			if (modes.includes('percent')) {
-				info.pct = atEnd ? 100 : Math.max(0, Math.min(100, Math.round((cum[line] / Math.max(1, cum[lines])) * 100)));
+			const cfg = this.settings;
+			if ((cfg.pageBubble !== false && cfg.pageShows === 'percent') || (cfg.pageHaptics !== false && this.hapMode() === 'percent')) {
+				info.pct = atEnd ? 100 : Math.max(0, Math.min(100, Math.round((cum[line] / Math.max(1, total0)) * 100)));
 			}
 			return info;
 		} catch (err) {
@@ -3498,12 +3561,14 @@ class NoteMinimapPlugin extends Plugin {
 		const y = st.pageY;
 		if (y === undefined) return;
 		const now = performance.now();
+		st.piM = null;
 		const file = st.view && st.view.file;
 		if (st.pageFile !== file) {
 			// Another note: no bubble for the jump back to where it was left.
 			st.pageFile = file;
 			st.pageSeen = y;
 			st.pageQuiet = now + 900;
+			this.pageWarm(st);
 			return;
 		}
 		if (st.pageSeen === undefined) {
@@ -3521,6 +3586,10 @@ class NoteMinimapPlugin extends Plugin {
 				}
 				if (hap) this.pageBuzz(st, now, rested);
 			}
+		} else if (now - (st.pwCheck || 0) > 250) {
+			// Not scrolling: if the note's text changed since the table was built, rebuild it in idle time.
+			st.pwCheck = now;
+			if (this.pageStale(st)) this.pageWarm(st);
 		}
 		if (bub && st.pageOn) this.pageMove(st, vpTop, vpH, now, false);
 	}
@@ -3655,6 +3724,12 @@ class NoteMinimapPlugin extends Plugin {
 		}
 	}
 
+	// One reused media query (its .matches is always live) instead of a new one on every call.
+	reducedMotion() {
+		if (this._rmq === undefined) this._rmq = window.matchMedia ? window.matchMedia('(prefers-reduced-motion: reduce)') : null;
+		return !!(this._rmq && this._rmq.matches);
+	}
+
 	pageSet(st, info, animate) {
 		const mode = this.settings.pageShows || 'page';
 		let t;
@@ -3674,8 +3749,7 @@ class NoteMinimapPlugin extends Plugin {
 			st.pageOf.textContent = sub;
 			st.pageOf.style.display = sub ? '' : 'none';
 		}
-		const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-		if (animate && changed && !reduced && st.pageNum.animate) {
+		if (animate && changed && st.pageNum.animate && !this.reducedMotion()) {
 			st.pageNum.animate([{ transform: 'scale(1.22)' }, { transform: 'scale(1)' }], { duration: 130, easing: 'ease-out' });
 		}
 	}
