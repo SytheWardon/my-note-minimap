@@ -20,7 +20,7 @@ const UPDATE_EVERY_MS = 24 * 60 * 60 * 1000; // the automatic check runs at most
 // The version of this code. It travels inside main.js, so it is always the version that is actually running (Obsidian
 // only reads manifest.json at start-up, and reading it from disk ourselves caused a hitch). Keep it equal to the
 // version in manifest.json; the release workflow refuses to publish if they differ.
-const PLUGIN_VERSION = '4.6.0';
+const PLUGIN_VERSION = '4.6.2';
 
 // 1 if version a is newer than b, -1 if older, 0 if the same ("1.2.3" style, a leading "v" is ignored).
 function cmpVer(a, b) {
@@ -3157,6 +3157,9 @@ class NoteMinimapPlugin extends Plugin {
 			st.el.style.setProperty('--nm-top', iTop + 'px');
 			st.el.style.setProperty('--nm-height', 'calc(100% - ' + (iTop + iBottom) + 'px)');
 			st.el.style.setProperty('--nm-edge', this.inset('insetEdge') + 'px');
+			// Left over from a minimap drag; the scrollbar never uses the dimming overlays.
+			st.el.style.removeProperty('--nm-fade-top');
+			st.el.style.removeProperty('--nm-fade-bot');
 		} else {
 			st.host.style.removeProperty('--nm-gutter');
 			st.vpEl.style.removeProperty('transform');

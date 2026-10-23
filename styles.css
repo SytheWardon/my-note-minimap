@@ -201,6 +201,13 @@
 	box-shadow: var(--nm-thumb-shadow-active, none);
 }
 
+/* While the bar is being dragged, the groove steps aside (the minimap's dimming overlays share these two
+   pseudo-elements, so they are switched off explicitly rather than by accident of their height). */
+.note-minimap.nm-scrollbar.note-minimap-dragging::before,
+.note-minimap.nm-scrollbar.note-minimap-dragging::after {
+	display: none;
+}
+
 /* The faint groove between the arrows. */
 .note-minimap.nm-scrollbar::before {
 	content: '';
