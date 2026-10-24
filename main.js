@@ -20,7 +20,7 @@ const UPDATE_EVERY_MS = 24 * 60 * 60 * 1000; // the automatic check runs at most
 // The version of this code. It travels inside main.js, so it is always the version that is actually running (Obsidian
 // only reads manifest.json at start-up, and reading it from disk ourselves caused a hitch). Keep it equal to the
 // version in manifest.json; the release workflow refuses to publish if they differ.
-const PLUGIN_VERSION = '4.6.2';
+const PLUGIN_VERSION = '5.2.2';
 
 // 1 if version a is newer than b, -1 if older, 0 if the same ("1.2.3" style, a leading "v" is ignored).
 function cmpVer(a, b) {
@@ -48,6 +48,9 @@ const DEFAULTS = {
 	insetTop: null, // px trimmed off the top of the scrollbar
 	insetBottom: null, // px trimmed off the bottom of the scrollbar
 	insetEdge: null, // px gap between the scrollbar and the screen edge
+	mapTop: null, // px between the header and the top of the minimap (null = measured on this device)
+	mapBottom: null, // px between the bottom bar and the bottom of the minimap (null = measured on this device)
+	mapEdge: null, // px gap between the minimap and the screen edge (null = automatic, see MAP_EDGE)
 	touchEnabled: true, // false = the strip ignores touches (they reach the note)
 	touchButton: true, // show an on/off button in the note header
 	hideScrollbar: false, // long-press the header button to hide / show the whole strip
@@ -78,36 +81,23 @@ const DEFAULTS = {
 	glowOpacity: 0.8,
 	side: 'right',
 	width: 12, // % of the note width
-	top: 5, // % from the top of the note
-	height: 60, // % of the note height
+	top: 0, // % of the free space (between the header and the bottom bar) left empty above the minimap
+	height: 100, // % of that free space
 	hideOnMobile: false,
-	fastRender: true, // faster minimap: painted on one canvas, and refreshed more gently while you type
+	fastRender: true, // faster minimap: painted on one canvas, and rebuilt almost at once after an edit (the wait grows with what a rebuild costs, so heavy notes stay light)
+	dragSlop: 6, // px: while a finger or pointer is held on the strip, movement smaller than this is ignored (0 = off)
 	exclusions: [],
 };
 
+// The minimap's own edge gap when you have not set one: about where the header's buttons end on a phone, so the
+// panel lines up with them instead of hugging the glass.
+const MAP_EDGE = 12;
 const DESKTOP_INSETS = { insetTop: 0, insetBottom: 0, insetEdge: 0 };
 const LINE_H = 2; // px per bar
 const GAP = 1; // px between bars
 const MAX_ROWS = 3000; // very long notes are sampled
 const ROW = LINE_H + GAP; // px from one bar to the next
-
-// Fast rendering draws the minimap on one canvas, so the bar colours live here instead of in CSS.
-// [colour, opacity]; a null colour means the theme's normal text colour.
-const MAP_STYLE = {
-	'nm-text': [null, 0.35],
-	'nm-h1': ['#e06c75', 1],
-	'nm-h2': ['#d19a66', 1],
-	'nm-h3': ['#e5c07b', 1],
-	'nm-h4': ['#98c379', 1],
-	'nm-h5': ['#56b6c2', 1],
-	'nm-h6': ['#61afef', 1],
-	'nm-code': ['#61afef', 0.55],
-	'nm-quote': ['#c678dd', 0.6],
-	'nm-list': ['#98c379', 0.6],
-	'nm-hr': ['#d19a66', 0.7],
-	'nm-em': ['#e5c07b', 0.6],
-	'nm-frontmatter': ['#9aa5b1', 0.75],
-};
+const H_KEYS = ['', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6']; // palette keys by heading level (no string built per row)
 
 const CAN_BUZZ = typeof navigator !== 'undefined' && typeof navigator.vibrate === 'function';
 
@@ -116,6 +106,35 @@ const HEADING_RE = /^#{1,6}\s/;
 const HR_RE = /^(-{3,}|\*{3,}|_{3,})$/;
 const LIST_RE = /^([-*+]|\d+[.)])\s/;
 const EM_RE = /\*\*[^*]+\*\*|==[^=]+==|(^|[^*])\*[^*\s][^*]*\*/;
+const CALLOUT_RE = /^>\s*\[!([\w-]+)\]/;
+const LIST_MARK_RE = /^([-*+]|\d+[.)])\s/;
+const INLINE_TEST = /[*=`\[~$#_]/;
+// Words inside a line that have their own colour in the note: bold, italic, highlight, inline code, links,
+// tags, strikethrough, inline maths. Group 1 is only set for a tag (it needs a space or the line start before it).
+const INLINE_RE = /\*\*[^*\n]+\*\*|__[^_\n]+__|==[^=\n]+==|`[^`\n]+`|\[\[[^\]\n]+\]\]|\[[^\]\n]*\]\([^)\n]*\)|~~[^~\n]+~~|\$[^$\n]+\$|\*[^*\s][^*\n]*\*|(^|\s)#[A-Za-z][\w/-]*/g;
+
+// Returns a flat list [from, to, colourKey, from, to, colourKey, ...] in characters of the trimmed line, or null.
+function inlineRuns(t) {
+	let out = null;
+	let n = 0;
+	let mt;
+	INLINE_RE.lastIndex = 0;
+	while (n < 24 && (mt = INLINE_RE.exec(t))) {
+		const s = mt[0];
+		let a = mt.index;
+		let key;
+		if (mt[1] !== undefined) {
+			a += mt[1].length;
+			key = 'tag';
+		} else {
+			const c = s.charCodeAt(0);
+			key = c === 42 ? (s.charCodeAt(1) === 42 ? 'b' : 'i') : c === 95 ? 'b' : c === 61 ? 'hl' : c === 96 ? 'ic' : c === 91 ? (s.charCodeAt(1) === 91 ? 'wl' : 'ml') : c === 126 ? 's' : 'mt';
+		}
+		(out || (out = [])).push(a, mt.index + s.length, key);
+		n++;
+	}
+	return out;
+}
 
 // The class of one trimmed line that is not front matter or inside a code fence. The first
 // character rules out most of the patterns, so a plain line costs a couple of comparisons
@@ -152,6 +171,7 @@ function classify(text, maxRows) {
 	if (firstEnd === -1) firstEnd = len;
 	let inFront = text.slice(0, firstEnd).trim() === '---';
 	let fence = null;
+	let callout = null; // type of the callout the current line sits in, or null
 	let pos = 0;
 
 	for (let n = 0; n < total; n++) {
@@ -163,11 +183,11 @@ function classify(text, maxRows) {
 		// such state open, that means it has to open a fence: its first real character is a backtick or
 		// tilde. Most lines start with some other plain ASCII character and are skipped without being
 		// sliced out. Anything unusual (control or non-ASCII leading characters) takes the normal path.
-		if (!keep && !inFront && fence === null) {
+		if (!keep && !inFront && fence === null && callout === null) {
 			let i = pos;
 			let c = text.charCodeAt(i);
 			while (i < end && (c === 32 || c === 9)) c = text.charCodeAt(++i);
-			if (i >= end || (c > 32 && c < 127 && c !== 96 && c !== 126)) {
+			if (i >= end || (c > 32 && c < 127 && c !== 96 && c !== 126 && c !== 62)) {
 				pos = end + 1;
 				continue;
 			}
@@ -177,6 +197,7 @@ function classify(text, maxRows) {
 		pos = end + 1;
 		const t = raw.trim();
 		let cls;
+		let coKey = null;
 
 		if (inFront) {
 			cls = 'nm-frontmatter';
@@ -187,13 +208,40 @@ function classify(text, maxRows) {
 		} else if ((t.charCodeAt(0) === 96 || t.charCodeAt(0) === 126) && FENCE_RE.test(t)) {
 			fence = t.slice(0, 3);
 			cls = 'nm-code';
-		} else if (keep) {
-			cls = classifyPlain(t);
 		} else {
-			continue; // not sampled, and it changes no state
+			// A callout starts at "> [!type]" and runs for as long as the lines keep starting with ">".
+			const c0 = t.charCodeAt(0);
+			let title = false;
+			if (c0 === 62) {
+				if (callout === null) {
+					const cm = CALLOUT_RE.exec(t);
+					if (cm) {
+						callout = cm[1].toLowerCase();
+						title = true;
+					}
+				}
+				coKey = callout;
+			} else {
+				callout = null;
+			}
+			if (!keep) continue; // not sampled; the state above is all it changes
+			cls = c0 === 62 ? (coKey === null ? 'nm-quote' : title ? 'nm-callout-title' : 'nm-callout') : classifyPlain(t);
 		}
 
-		if (keep) out.push({ cls, len: t.length, indent: raw.length - raw.trimStart().length });
+		if (keep) {
+			const item = { cls, len: t.length, indent: raw.length - raw.trimStart().length, ln: n };
+			if (coKey !== null) item.co = coKey;
+			// Words with their own colour. Headings, code, front matter and rules are one colour all the way along.
+			if (cls !== 'nm-code' && cls !== 'nm-frontmatter' && cls !== 'nm-hr' && !(cls.charCodeAt(3) === 104 && cls.charCodeAt(4) >= 49 && cls.charCodeAt(4) <= 54)) {
+				let runs = t.length > 1 && INLINE_TEST.test(t) ? inlineRuns(t) : null;
+				if (cls === 'nm-list') {
+					const lm = LIST_MARK_RE.exec(t);
+					if (lm) (runs = runs || []).unshift(0, lm[0].length - 1, 'lm');
+				}
+				if (runs) item.runs = runs;
+			}
+			out.push(item);
+		}
 	}
 	return { items: out, step };
 }
@@ -445,7 +493,13 @@ class NoteMinimapPlugin extends Plugin {
 		// v12: the arrow buttons are taller (36 -> 52 px), so a single tap lands easily. The old default becomes the
 		// new one; any other size you chose is kept.
 		if ((saved.ver || 1) < 12 && saved.arrowSize === 36) this.settings.arrowSize = DEFAULTS.arrowSize;
-		this.settings.ver = 12;
+		// v13: the minimap fills the space between the header and the bottom bar, like the scrollbar. The old
+		// defaults (5 % down, 60 % tall) become the new ones; anything you set yourself is kept.
+		if ((saved.ver || 1) < 13) {
+			if (saved.top === 5) this.settings.top = DEFAULTS.top;
+			if (saved.height === 60) this.settings.height = DEFAULTS.height;
+		}
+		this.settings.ver = 13;
 		this.states = new Map();
 		this._unloaded = false;
 		this._refreshQueued = false;
@@ -463,7 +517,17 @@ class NoteMinimapPlugin extends Plugin {
 		// Typing only needs the minimap lines (or the thumb size) refreshed, not every setting re-applied.
 		// Fast rendering waits a little longer after you stop typing, so a burst of edits costs one rebuild.
 		const refreshSoonNormal = debounce(() => this.refreshContent(), 300, true);
-		const refreshSoonFast = debounce(() => this.refreshContent(), 800, true);
+		// Fast rendering: the minimap follows the note almost at once. The first change schedules one rebuild a few
+		// milliseconds later, and every change that arrives before it runs is picked up by that same rebuild, so typing
+		// never queues more than one. How long it waits depends on what the last rebuild cost (see contentDelay), so a
+		// short note is redrawn within a frame or two while a very long one still backs off, as the old 0.8 s wait did.
+		const refreshSoonFast = () => {
+			if (this._contentT) return;
+			this._contentT = window.setTimeout(() => {
+				this._contentT = null;
+				if (!this._unloaded) this.refreshContent();
+			}, this.contentDelay());
+		};
 		const refreshSoon = () => (this.settings.fastRender ? refreshSoonFast() : refreshSoonNormal());
 
 		this.registerEvent(this.app.workspace.on('layout-change', refresh));
@@ -492,7 +556,13 @@ class NoteMinimapPlugin extends Plugin {
 		// A theme or colour-scheme change: the canvas minimap has to pick up the new text colour.
 		this.registerEvent(this.app.workspace.on('css-change', () => {
 			this._mapText = null;
-			for (const st of this.states.values()) st.mapDirty = true;
+			this._pal = null;
+			this._coCache = null;
+			this._mmAuto = null;
+			for (const st of this.states.values()) {
+				st.mapDirty = true;
+				st.renderKey = null; // re-apply the colours the strip hands to its bars
+			}
 			this.queueRefresh();
 		}));
 		this.app.workspace.onLayoutReady(() => {
@@ -688,7 +758,55 @@ class NoteMinimapPlugin extends Plugin {
 	// The margin actually in use: your own value, or this device's automatic one.
 	inset(key) {
 		const v = this.settings[key];
-		return typeof v === 'number' ? v : this.device()[key];
+		if (typeof v === 'number') return v;
+		if (key === 'mapEdge') return Platform.isMobile ? Math.max(this.device().insetEdge, MAP_EDGE) : 6;
+		if (key === 'mapTop') return this.minimapAuto().top;
+		if (key === 'mapBottom') return this.minimapAuto().bottom;
+		return this.device()[key];
+	}
+
+	// The minimap's own top and bottom margins when you have not set them: measured on this device, so they scale
+	// with it. The top clears the header where it floats over the note, the bottom clears the bottom bar (its
+	// height plus the gap it floats above the screen edge), and each gets a little air that grows with the screen's
+	// height. The bars slide away while you scroll, so the largest reading seen for this window size is kept.
+	minimapAuto() {
+		const key = window.innerWidth + 'x' + window.innerHeight;
+		let c = this._mmAuto;
+		if (!c || c.key !== key) c = this._mmAuto = { key, head: 0, nav: 0, seen: false, at: -1e9 };
+		const now = performance.now();
+		// Reading where things are forces the page to lay itself out, and this is asked on every refresh, so it is
+		// measured at most a few times a second (the bars only change when they slide, which takes longer than that).
+		if (now - c.at > 250) {
+			c.at = now;
+			this.measureBars(c);
+		}
+		const air = Math.max(8, Math.min(18, Math.round(window.innerHeight * 0.013)));
+		const dev = this.device();
+		const phone = Platform.isMobile;
+		const top = c.head > 0 ? c.head + air : c.seen || !phone ? air : dev.insetTop;
+		const bottom = c.nav > 0 ? c.nav + air : phone ? dev.insetBottom : air;
+		return { top, bottom };
+	}
+
+	measureBars(c) {
+		try {
+			const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+			const root = view && view.containerEl;
+			const hd = root && root.querySelector('.view-header');
+			const ct = root && root.querySelector('.view-content');
+			if (hd && ct && hd.offsetHeight) {
+				const ov = hd.getBoundingClientRect().bottom - ct.getBoundingClientRect().top;
+				if (ov > c.head) c.head = Math.ceil(ov);
+				c.seen = true;
+			}
+			const nav = document.querySelector('.mobile-navbar');
+			if (nav && nav.offsetHeight) {
+				const cl = window.innerHeight - nav.getBoundingClientRect().top;
+				if (cl > 0 && cl < window.innerHeight / 2 && cl > c.nav) c.nav = Math.ceil(cl);
+			}
+		} catch (e) {
+			/* keep what was measured */
+		}
 	}
 
 	// ---- Updates ----
@@ -789,6 +907,8 @@ class NoteMinimapPlugin extends Plugin {
 		this.uninstallLoadBoost();
 		if (this._askTimer) clearTimeout(this._askTimer);
 		if (this._updTimer) clearTimeout(this._updTimer);
+		if (this._contentT) clearTimeout(this._contentT);
+		this._contentT = null;
 		this.flushSave();
 		this.clearToast();
 		for (const view of Array.from(this.states.keys())) this.detach(view);
@@ -1624,19 +1744,40 @@ class NoteMinimapPlugin extends Plugin {
 		this._toastEl = null;
 	}
 
+	// What the strip is called right now, for messages: the scrollbar or the minimap.
+	barName() {
+		return this.settings.style === 'minimap' ? 'Minimap' : 'Scrollbar';
+	}
+
+	// Whether the arrow buttons are shown: scrollbar style with arrows on. Turning touch off or hiding the bar
+	// does not remove them; they stay and keep working, and only the bar itself stops taking touches or goes.
+	arrowsOn(s) {
+		const st = s || this.settings;
+		return st.style === 'scrollbar' && !!st.showArrows;
+	}
+
+	// How far (px) a held pointer has to travel before the drag follows it. Smaller moves are micro movement and are
+	// ignored. 0 turns the dead zone off.
+	slopPx() {
+		const v = Number(this.settings.dragSlop);
+		return Number.isFinite(v) && v >= 0 ? Math.min(24, v) : DEFAULTS.dragSlop;
+	}
+
 	async toggleTouch() {
 		this.settings.touchEnabled = !this.settings.touchEnabled;
 		await this.saveSettings();
-		this.toast(this.settings.touchEnabled ? 'Scrollbar touch: on' : 'Scrollbar touch: off', 600);
+		const off = !this.settings.touchEnabled;
+		this.toast(this.barName() + ' touch: ' + (off ? 'off' : 'on') + (off && this.arrowsOn() ? ' (arrows still work)' : ''), off && this.arrowsOn() ? 1100 : 600);
 	}
 
 	async toggleHide() {
 		this.settings.hideScrollbar = !this.settings.hideScrollbar;
 		await this.saveSettings();
-		this.toast(this.settings.hideScrollbar ? 'Scrollbar hidden' : 'Scrollbar shown', 600);
+		const hid = this.settings.hideScrollbar;
+		this.toast(this.barName() + (hid ? ' hidden' : ' shown'), 600);
 	}
 
-	// Tap = touch on / off (the button's own click). Long press = hide / show the whole scrollbar.
+	// Tap = touch on / off (the button's own click). Long press = hide / show the whole scrollbar or minimap.
 	bindLongPress(btn) {
 		let timer = null;
 		let fired = false;
@@ -1734,7 +1875,9 @@ class NoteMinimapPlugin extends Plugin {
 	// The button is highlighted while the touch area is on.
 	refreshButtons() {
 		const on = this.settings.touchEnabled;
-		const k = on + '|' + this.settings.hideScrollbar;
+		const nm = this.barName();
+		const low = nm.toLowerCase();
+		const k = on + '|' + this.settings.hideScrollbar + '|' + nm;
 		for (const btn of this.buttons.values()) {
 			if (btn._nmOn === k) continue;
 			btn._nmOn = k;
@@ -1742,8 +1885,8 @@ class NoteMinimapPlugin extends Plugin {
 			btn.toggleClass('nm-strip-off', !!this.settings.hideScrollbar);
 			btn.setAttribute(
 				'aria-label',
-				(on ? 'Scrollbar touch: on (tap to turn off)' : 'Scrollbar touch: off (tap to turn on)') +
-					(this.settings.hideScrollbar ? ', scrollbar hidden (long-press to show)' : ', long-press to hide the scrollbar')
+				(on ? nm + ' touch: on (tap to turn off)' : nm + ' touch: off (tap to turn on)') +
+					(this.settings.hideScrollbar ? ', ' + low + ' hidden (long-press to show)' : ', long-press to hide the ' + low)
 			);
 		}
 	}
@@ -1875,6 +2018,14 @@ class NoteMinimapPlugin extends Plugin {
 	}
 
 	// Light refresh used while typing: only what depends on the note's text or height.
+	// How long to wait before rebuilding the minimap after the note changed: five times what the last rebuild took,
+	// never less than 40 ms (about two frames) and never more than 800 ms. A rebuild that costs 8 ms or less is
+	// therefore done in 40 ms; one that costs 160 ms or more waits the full 0.8 s, so heavy notes stay light to type in.
+	contentDelay() {
+		const ms = Number(this._buildMs) || 0;
+		return Math.round(Math.min(800, Math.max(40, ms * 5)));
+	}
+
 	refreshContent() {
 		for (const [view, st] of this.states) {
 			// Only notes that actually changed. The rest keep their strip as it is.
@@ -1890,7 +2041,9 @@ class NoteMinimapPlugin extends Plugin {
 			else if (this.settings.fastRender && view.containerEl.offsetParent === null) continue;
 			else {
 				st.pending = false;
+				const t0 = performance.now();
 				this.update(view);
+				this._buildMs = performance.now() - t0; // what contentDelay() goes by
 			}
 		}
 	}
@@ -1940,7 +2093,20 @@ class NoteMinimapPlugin extends Plugin {
 
 		const el = host.createDiv({ cls: 'note-minimap' });
 		el.style.touchAction = 'none';
-		const linesEl = el.createDiv({ cls: 'note-minimap-lines' });
+		// The picture and its dimming live in their own clipping layer, so the rounded corners hold even while the
+		// strip lets its page bubble stick out during a drag.
+		const clipEl = el.createDiv({ cls: 'nm-clip' });
+		// The scrollbar's groove: a body and two round end caps, so that folding it never squashes the ends.
+		const grooveEl = el.createDiv({ cls: 'nm-groove' });
+		const grooveIn = grooveEl.createDiv({ cls: 'nm-groove-in' });
+		const groove = {
+			root: grooveEl,
+			top: grooveIn.createDiv({ cls: 'nm-g-top' }),
+			body: grooveIn.createDiv({ cls: 'nm-g-body' }),
+			bot: grooveIn.createDiv({ cls: 'nm-g-bot' }),
+			anims: null,
+		};
+		const linesEl = clipEl.createDiv({ cls: 'note-minimap-lines' });
 		const vpEl = el.createDiv({ cls: 'note-minimap-viewport' });
 		el.createDiv({ cls: 'nm-arrow nm-arrow-up' });
 		el.createDiv({ cls: 'nm-arrow nm-arrow-down' });
@@ -1949,6 +2115,8 @@ class NoteMinimapPlugin extends Plugin {
 			view, // the note this strip belongs to (its editor is asked to draw ahead during a hold)
 			host,
 			el,
+			clipEl,
+			groove,
 			linesEl,
 			vpEl,
 			scroller: null,
@@ -2056,6 +2224,12 @@ class NoteMinimapPlugin extends Plugin {
 		el.addEventListener('selectstart', (e) => e.preventDefault());
 
 		el.addEventListener('pointerdown', (e) => {
+			// Touch off: only the two arrow buttons answer; the rest of the column is the note's.
+			if (st.el.hasClass('nm-touch-off')) {
+				const r0 = rectOf(true);
+				const y0 = e.clientY - r0.top;
+				if (!(y0 < st.arrow || y0 > r0.height - st.arrow)) return;
+			}
 			e.preventDefault();
 			this.ensureScroller(view, st);
 			if (!st.scroller || !st.stripH) return;
@@ -2081,6 +2255,10 @@ class NoteMinimapPlugin extends Plugin {
 			this.endHold(st);
 			st.dragging = true;
 			st.lastY = e.clientY;
+			// Micro movement while held: a resting finger drifts a pixel or two. Until the pointer has travelled slopPx() from
+			// where it came down, those moves are ignored; once it has, the drag follows it normally.
+			st.dzY = e.clientY;
+			st.dzOn = this.slopPx() > 0;
 			el.addClass('note-minimap-dragging');
 			// Grabbing the thumb keeps it under the finger; tapping the track glides there.
 			// The thumb can be thin on a long note, so a touch near it counts as a grab (at least 56 px tall in all),
@@ -2096,6 +2274,10 @@ class NoteMinimapPlugin extends Plugin {
 
 		el.addEventListener('pointermove', (e) => {
 			if (st.dragging && st.scroller) {
+				if (st.dzOn) {
+					if (Math.abs(e.clientY - st.dzY) < this.slopPx()) return;
+					st.dzOn = false;
+				}
 				if (e.clientY === st.lastY) return;
 				st.lastY = e.clientY;
 				// glide() either moves the note and the thumb itself (smooth scrolling off) or starts the
@@ -2109,6 +2291,7 @@ class NoteMinimapPlugin extends Plugin {
 			st.rect = null;
 			st.pressDir = 0;
 			st.dragging = false;
+			st.dzOn = false;
 			el.removeClass('note-minimap-dragging');
 			this.endHold(st, e && e.type);
 			if (!st.running) st.lead = false; // otherwise cleared once the note settles
@@ -2169,6 +2352,8 @@ class NoteMinimapPlugin extends Plugin {
 		st.dead = true;
 		this.engineStop(st);
 		if (st.pressTimer) clearTimeout(st.pressTimer);
+		window.clearTimeout(st.sleepT);
+		this.dropGroove(st);
 		this.settleBars();
 		this.unbind(st);
 		if (st.ro) st.ro.disconnect();
@@ -3095,7 +3280,8 @@ class NoteMinimapPlugin extends Plugin {
 			s.style, s.side, s.touchEnabled, s.showArrows, s.hitWidth, this.barWidth(), s.arrowSize,
 			s.thumbColor, s.thumbOpacity, s.shape, s.glow, s.glowColor, s.glowBlur, s.glowSpread,
 			s.glowOpacity, s.showTrack, s.width, s.top, s.height, s.hideScrollbar, s.holdSpeed,
-			this.inset('insetTop'), this.inset('insetBottom'), this.inset('insetEdge'),
+			this.inset('insetTop'), this.inset('insetBottom'), this.inset('insetEdge'), this.inset('mapEdge'),
+			s.style === 'scrollbar' ? 0 : this.inset('mapTop') + '/' + this.inset('mapBottom'),
 		].join('|');
 	}
 
@@ -3105,10 +3291,11 @@ class NoteMinimapPlugin extends Plugin {
 		const left = s.side === 'left';
 
 		st.el.toggleClass('nm-scrollbar', sb);
-		st.el.toggleClass('nm-has-arrows', sb && s.showArrows && s.touchEnabled);
+		st.el.toggleClass('nm-has-arrows', sb && s.showArrows);
 		st.el.toggleClass('nm-touch-off', !s.touchEnabled);
 		st.el.toggleClass('nm-hidden', !!s.hideScrollbar);
-		if (!s.touchEnabled || s.hideScrollbar) {
+		if (!s.touchEnabled) st.dragging = false;
+		if ((!s.touchEnabled && !this.arrowsOn(s)) || s.hideScrollbar) {
 			this.engineStop(st);
 			st.dragging = false;
 			this.settleBars();
@@ -3133,7 +3320,7 @@ class NoteMinimapPlugin extends Plugin {
 			st.el.style.setProperty('--nm-glyph', Math.min(20, Math.max(10, this.barWidth())) + 'px');
 			st.el.style.setProperty('--nm-arrow', s.arrowSize + 'px');
 			st.el.style.setProperty('--nm-flow', Math.round(Math.min(800, Math.max(300, 480000 / Math.max(1, s.holdSpeed)))) + 'ms');
-			st.el.style.setProperty('--nm-arrow-gap', (s.showArrows && s.touchEnabled ? s.arrowSize : 0) + 'px');
+			st.el.style.setProperty('--nm-arrow-gap', (s.showArrows ? s.arrowSize : 0) + 'px');
 			const color = s.thumbColor || 'var(--text-accent)';
 			const radius = { pill: '999px', rounded: '6px', square: '0px' }[s.shape] || '999px';
 			st.el.style.setProperty('--nm-thumb-color', color);
@@ -3161,25 +3348,36 @@ class NoteMinimapPlugin extends Plugin {
 			st.el.style.removeProperty('--nm-fade-top');
 			st.el.style.removeProperty('--nm-fade-bot');
 		} else {
-			st.host.style.removeProperty('--nm-gutter');
 			st.vpEl.style.removeProperty('transform');
 			st.vpEl.style.removeProperty('top');
 			st.vpEl.style.removeProperty('height');
 			st.lastVpH = null;
 			st.lastVpTop = null;
+			// Its own margins (measured per device unless you set them): below the header, above the bottom bar, off the edge.
+			// Top offset and Height are shares of that free space (0 and 100 fill all of it).
+			const mTop = this.inset('mapTop');
+			const mBottom = this.inset('mapBottom');
+			const mEdge = this.inset('mapEdge');
 			const w = s.width + '%';
+			st.host.style.setProperty('--nm-gutter', 'calc(' + w + ' + ' + mEdge + 'px)');
 			st.host.style.setProperty('--nm-width', w);
 			st.el.style.setProperty('--nm-width', w);
-			// Same margins as the scrollbar, so the minimap never sits under the floating header or the
-			// bottom bar. Your top / height settings still apply wherever they leave more room.
-			const mTop = this.inset('insetTop');
-			const mBottom = this.inset('insetBottom');
-			const topCss = 'max(' + s.top + '%, ' + mTop + 'px)';
+			st.el.style.setProperty('--nm-edge', mEdge + 'px');
+			const free = '(100% - ' + (mTop + mBottom) + 'px)';
+			const topCss = 'calc(' + mTop + 'px + ' + free + ' * ' + s.top / 100 + ')';
 			st.el.style.setProperty('--nm-top', topCss);
-			st.el.style.setProperty('--nm-height', 'min(' + s.height + '%, calc(100% - ' + topCss + ' - ' + mBottom + 'px))');
+			st.el.style.setProperty('--nm-bottom', mBottom + 'px');
+			st.el.style.setProperty(
+				'--nm-height',
+				s.top <= 0 && s.height >= 100
+					? 'auto'
+					: 'min(calc(' + free + ' * ' + s.height / 100 + '), calc(100% - ' + topCss + ' - ' + mBottom + 'px))'
+			);
+			this.applyPaletteVars(st);
 		}
 
 		if (st.style !== s.style) {
+			this.dropGroove(st); // a fold left over from the other style must not carry across
 			st.style = s.style;
 			st.text = null;
 			st.stripH = 0;
@@ -3243,6 +3441,7 @@ class NoteMinimapPlugin extends Plugin {
 		st.linesEl.empty();
 		st.rows = [];
 		st.items = null;
+		st.tops = null;
 		st.mapDirty = true;
 		if (st.canvas) this.drawMap(st, st.el.clientHeight);
 	}
@@ -3256,7 +3455,7 @@ class NoteMinimapPlugin extends Plugin {
 		if (st.canvas) return;
 		const cv = document.createElement('canvas');
 		cv.className = 'note-minimap-canvas';
-		st.el.insertBefore(cv, st.vpEl);
+		st.clipEl.appendChild(cv);
 		st.canvas = cv;
 		st.ctx = cv.getContext('2d');
 		st.cvDirty = true;
@@ -3276,6 +3475,7 @@ class NoteMinimapPlugin extends Plugin {
 	buildMap(st, res) {
 		st.items = res.items;
 		st.stripH = res.items.length * ROW;
+		st.tops = null; // where each line really sits in the note is worked out again on the next paint
 		st.mapDirty = true;
 	}
 
@@ -3284,12 +3484,198 @@ class NoteMinimapPlugin extends Plugin {
 		return this._mapText;
 	}
 
+	// The colours the note really uses, read from the live theme by styling throw-away elements the way the note
+	// styles its own (heading levels, bold, italic, links, tags, code, highlight ...). Cached until the theme changes.
+	mapPalette() {
+		if (this._pal) return this._pal;
+		const pal = {};
+		const cs = (el) => getComputedStyle(el);
+		const clear = (c) => !c || c === 'transparent' || /(,\s*0|\/\s*0%?)\s*\)$/.test(c);
+		const solid = (c) => {
+			const mt = /^rgba?\(\s*([\d.]+)[,\s]+([\d.]+)[,\s]+([\d.]+)/.exec(c || '');
+			return mt ? 'rgb(' + mt[1] + ',' + mt[2] + ',' + mt[3] + ')' : c;
+		};
+		let root = null;
+		try {
+			root = document.body.createDiv({ cls: 'markdown-rendered markdown-preview-view nm-probe' });
+			root.style.cssText = 'position:fixed;left:-9999px;top:0;width:240px;visibility:hidden;pointer-events:none;';
+			const mk = (tag, cls) => root.createEl(tag, cls ? { cls } : {});
+			const col = (el) => cs(el).color;
+			const bodyCs = cs(document.body);
+			const sp = mk('span');
+			// A theme variable as a real colour, or the fallback when the theme does not define it.
+			const v = (name, fb) => {
+				if (!bodyCs.getPropertyValue(name).trim()) return fb;
+				sp.style.color = 'var(' + name + ')';
+				return col(sp);
+			};
+			pal.text = col(mk('p'));
+			for (let n = 1; n <= 6; n++) pal['h' + n] = col(mk('h' + n));
+			pal.b = col(mk('strong'));
+			pal.i = col(mk('em'));
+			const mark = mk('mark');
+			pal.hl = clear(cs(mark).backgroundColor) ? col(mark) : solid(cs(mark).backgroundColor);
+			pal.ic = col(mk('code'));
+			pal.wl = col(mk('a', 'internal-link'));
+			pal.ml = col(mk('a', 'external-link'));
+			pal.tag = col(mk('a', 'tag'));
+			pal.s = col(mk('del'));
+			pal.mt = pal.text;
+			pal.faint = v('--text-faint', pal.text);
+			pal.lm = v('--list-marker-color', v('--text-muted', pal.text));
+			pal.quote = col(mk('blockquote'));
+			pal.qb = v('--blockquote-border-color', v('--interactive-accent', pal.faint));
+			pal.hr = v('--hr-color', pal.faint);
+			pal.code = pal.ic;
+			const cb = v('--code-background', null);
+			pal.codeBg = cb && !clear(cb) ? cb : pal.faint;
+		} catch (e) {
+			// Anything the probe could not read falls back to the theme's text colour below.
+		} finally {
+			if (root) root.remove();
+		}
+		const base = pal.text || this.mapTextColor();
+		for (const k of ['text', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'b', 'i', 'hl', 'ic', 'wl', 'ml', 'tag', 's', 'mt', 'faint', 'lm', 'quote', 'qb', 'hr', 'code', 'codeBg']) {
+			if (!pal[k]) pal[k] = base;
+		}
+		this._pal = pal;
+		return pal;
+	}
+
+	// The colour of one callout type (info, tip, warning ...), as the theme sets it for that type.
+	calloutColor(type) {
+		if (!this._coCache) this._coCache = new Map();
+		let c = this._coCache.get(type);
+		if (c) return c;
+		let root = null;
+		try {
+			root = document.body.createDiv({ cls: 'markdown-rendered markdown-preview-view nm-probe' });
+			root.style.cssText = 'position:fixed;left:-9999px;top:0;width:240px;visibility:hidden;pointer-events:none;';
+			const el = root.createDiv({ cls: 'callout' });
+			el.setAttribute('data-callout', type);
+			const raw = getComputedStyle(el).getPropertyValue('--callout-color').trim();
+			c = raw ? (/^[\d.\s,]+$/.test(raw) ? 'rgb(' + raw + ')' : raw) : this.mapPalette().tag;
+		} catch (e) {
+			c = this.mapPalette().tag;
+		} finally {
+			if (root) root.remove();
+		}
+		this._coCache.set(type, c);
+		return c;
+	}
+
+	// The same colours for the one-div-per-bar minimap (Fast rendering off): the bars take them from variables on the strip.
+	applyPaletteVars(st) {
+		const pal = this.mapPalette();
+		for (const k of ['text', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'b', 'tag', 'faint', 'quote', 'hr', 'code']) st.el.style.setProperty('--nm-c-' + k, pal[k]);
+	}
+
+	// Where each line of the note really is. The strip used to give every line the same 3 px, so a callout, a block of
+	// maths or a wrapped paragraph threw the picture off the thumb; now every line is put at its true place in the note
+	// (the same scroll positions the thumb uses). tops[i] and hs[i] are in px of the note; hs[i] < 0 means the line is
+	// part of a block that an earlier line already stands for (display maths, a collapsed properties block).
+	computeTops(st, sh) {
+		const t0 = performance.now();
+		const items = st.items;
+		const n = items.length;
+		const tops = new Float32Array(n);
+		const hs = new Float32Array(n);
+		let lh = 0;
+		let ok = false;
+		try {
+			const view = st.view;
+			if (view && st.boundMode === 'preview') {
+				const r = view.previewMode && view.previewMode.renderer;
+				const secs = r && r.sections;
+				if (Array.isArray(secs) && secs.length) {
+					// The same walk Obsidian uses to stack its sections: heights not measured yet are guessed.
+					const sTop = new Array(secs.length);
+					const sH = new Array(secs.length);
+					let acc = 0;
+					for (let i = 0; i < secs.length; i++) {
+						const sec = secs[i];
+						let h = sec.height;
+						if (!sec.computed && h === 0 && i > 0) h = acc / i;
+						if (!sec.shown) h = 0;
+						sTop[i] = acc;
+						sH[i] = h;
+						acc += h;
+					}
+					let p = 0;
+					for (let i = 0; i < n; i++) {
+						const ln = items[i].ln;
+						while (p < secs.length - 1 && secs[p].end && secs[p].end.line < ln) p++;
+						const sec = secs[p];
+						if (!sec || !sec.start || !(sH[p] > 0)) {
+							tops[i] = sTop[p] || 0;
+							hs[i] = -1;
+							continue;
+						}
+						const lines = Math.max(1, (sec.end ? sec.end.line : sec.start.line) - sec.start.line + 1);
+						const f = Math.min(1, Math.max(0, (ln - sec.start.line) / lines));
+						tops[i] = sTop[p] + f * sH[p];
+						hs[i] = sH[p] / lines;
+					}
+					const cs = r.previewEl ? getComputedStyle(r.previewEl) : null;
+					lh = (cs && parseFloat(cs.lineHeight)) || 0;
+					ok = true;
+				}
+			} else if (view) {
+				const cm = view.editor && view.editor.cm;
+				if (cm && cm.state && typeof cm.lineBlockAt === 'function') {
+					const doc = cm.state.doc;
+					const pad = cm.documentPadding ? cm.documentPadding.top : 0;
+					lh = cm.defaultLineHeight || 0;
+					let prevFrom = -1;
+					let prevTop = 0;
+					for (let i = 0; i < n; i++) {
+						const ln = items[i].ln;
+						if (ln + 1 > doc.lines) {
+							tops[i] = prevTop;
+							hs[i] = -1;
+							continue;
+						}
+						const blk = cm.lineBlockAt(doc.line(ln + 1).from);
+						if (blk.from === prevFrom) {
+							tops[i] = prevTop;
+							hs[i] = -1;
+							continue;
+						}
+						prevFrom = blk.from;
+						prevTop = blk.top + pad;
+						tops[i] = prevTop;
+						hs[i] = blk.height;
+					}
+					ok = true;
+				}
+			}
+		} catch (e) {
+			ok = false;
+		}
+		if (!ok) {
+			// No layout to read (or it failed): every line gets an equal share of the note, as before.
+			const each = Math.max(1, sh) / Math.max(1, n);
+			for (let i = 0; i < n; i++) {
+				tops[i] = i * each;
+				hs[i] = each;
+			}
+			lh = each;
+		}
+		st.tops = tops;
+		st.hs = hs;
+		st.lh = lh > 4 ? lh : 28;
+		st.topsSh = sh;
+		st.topsAt = performance.now();
+		st.topsMs = st.topsAt - t0; // what the next re-read is spaced by (see drawMap)
+	}
+
 	// Paints the bars that fall inside the strip. Skipped when nothing moved since the last paint.
 	drawMap(st, mapH) {
 		const cv = st.canvas;
 		if (!cv || !st.ctx) return;
 		const top = Math.round(st.stripTop || 0);
-		if (!st.mapDirty && !st.cvDirty && st.drawnTop === top && st.drawnH === mapH) return;
+		const sh = Math.max(1, Math.round(st.curSh || 0)) || 1;
+		if (!st.mapDirty && !st.cvDirty && st.drawnTop === top && st.drawnH === mapH && st.drawnSh === sh) return;
 
 		if (st.cvDirty || st.drawnH !== mapH) {
 			st.cvW = st.el.clientWidth;
@@ -3304,6 +3690,7 @@ class NoteMinimapPlugin extends Plugin {
 		st.mapDirty = false;
 		st.drawnTop = top;
 		st.drawnH = mapH;
+		st.drawnSh = sh;
 
 		const ctx = st.ctx;
 		const w = st.cvW;
@@ -3311,22 +3698,132 @@ class NoteMinimapPlugin extends Plugin {
 		const items = st.items;
 		if (!items || !items.length) return;
 
-		// Only rows whose 2px bar overlaps the visible strip.
-		const first = Math.max(0, Math.floor((-top - LINE_H) / ROW) + 1);
-		const last = Math.min(items.length - 1, Math.ceil((mapH - top) / ROW) - 1);
-		let curCls = null;
-		for (let r = first; r <= last; r++) {
+		// The editor corrects its guess of the note's height as it draws, so the layout is read again when the height
+		// has moved. How soon it may be read again depends on what the last read cost: eight times that, between 33 ms
+		// (about every other frame) and 200 ms (the old fixed limit), so a cheap read keeps up and a costly one is spaced out.
+		if (!st.tops || st.tops.length !== items.length || (Math.abs(sh - st.topsSh) > 2 && performance.now() - st.topsAt > Math.min(200, Math.max(33, (st.topsMs || 0) * 8)))) this.computeTops(st, sh);
+		const tops = st.tops;
+		const hs = st.hs;
+		const lh = st.lh;
+		const k = st.stripH / sh; // strip px per px of the note: the same scale the thumb uses
+		const pal = this.mapPalette();
+		const yEnd = (mapH - top) / k;
+		// First line that can reach the strip: start a little above it, so tall blocks that begin off-screen still show.
+		let lo = 0;
+		let hi = tops.length;
+		const want = (-top) / k - 600;
+		while (lo < hi) {
+			const mid = (lo + hi) >> 1;
+			if (tops[mid] < want) lo = mid + 1;
+			else hi = mid;
+		}
+		// The picture keeps a little air from the panel's sides and fades out toward its top and bottom ends, so the
+		// rounded corners are never covered by square bars.
+		const PAD = 5;
+		const wi = Math.max(4, w - 2 * PAD);
+		const EDGE = 14;
+		const fade = (yy) => {
+			const e = Math.min(yy, mapH - yy - 2) / EDGE;
+			return e >= 1 ? 1 : e <= 0 ? 0 : e * e * (3 - 2 * e);
+		};
+		const step = Math.max(2.4, lh * k); // strip px from one wrapped row to the next
+		const thick = Math.min(LINE_H, step - 0.6);
+		// The canvas keeps its fill colour and alpha between calls, and almost every row repeats the previous row's colour,
+		// so each is only written when it differs from what was written last (a write is a string parse or a state change).
+		// The context's own state is unknown at the start of a paint, so nothing is assumed: the first write always happens.
+		let curA = -1;
+		let curF = null;
+		const setA = (v) => {
+			if (v !== curA) {
+				curA = v;
+				ctx.globalAlpha = v;
+			}
+		};
+		const setF = (v) => {
+			if (v !== curF) {
+				curF = v;
+				ctx.fillStyle = v;
+			}
+		};
+		for (let r = lo; r < items.length; r++) {
+			if (tops[r] > yEnd) break;
+			const hh = hs[r];
+			if (hh < 0) continue;
 			const it = items[r];
 			if (!it || it.cls === 'nm-blank') continue;
-			if (it.cls !== curCls) {
-				curCls = it.cls;
-				const ms = MAP_STYLE[it.cls] || MAP_STYLE['nm-text'];
-				ctx.fillStyle = ms[0] || this.mapTextColor();
-				ctx.globalAlpha = ms[1];
+			const cls = it.cls;
+			const y = top + tops[r] * k;
+			const bh = Math.max(ROW, hh * k); // how tall the line really is in the note, in strip px
+			if (y + bh < 0) continue;
+			// A paragraph that wraps over several screen lines is drawn as several rows.
+			const nr = Math.max(1, Math.min(80, Math.round(hh / lh)));
+			const ind = it.indent ? Math.min(it.indent * 2, 16) : 0;
+			const left = PAD + ind;
+			const full = nr === 1 ? (wi * (cls === 'nm-hr' ? 100 : Math.min(100, Math.max(8, (it.len / 80) * 100)))) / 100 : Math.max(4, wi - ind);
+			const fb = fade(y);
+			const cpr = nr === 1 ? Math.max(1, it.len) : Math.max(1, it.len) / (nr - 0.5); // characters per row; the last row is half full
+			let base = pal.text;
+			let alpha = 0.7; // plain words are a little softer, so headings and coloured words stand out
+			const c3 = cls.charCodeAt(3);
+			const c4 = cls.charCodeAt(4);
+			if (c3 === 104 && c4 >= 49 && c4 <= 54) {
+				base = pal[H_KEYS[c4 - 48]];
+				alpha = 1;
+			} else if (cls === 'nm-code') {
+				setA(0.55 * fb);
+				setF(pal.codeBg);
+				ctx.fillRect(2, y - 0.5, w - 4, bh + 0.5);
+				base = pal.code;
+				alpha = 0.9;
+			} else if (cls === 'nm-callout-title' || cls === 'nm-callout') {
+				const cc = this.calloutColor(it.co || 'note');
+				setF(cc);
+				setA(0.18 * fb);
+				ctx.fillRect(2, y - 0.5, w - 4, bh + 0.5);
+				setA(fb);
+				ctx.fillRect(2, y - 0.5, 2, bh + 0.5);
+				if (cls === 'nm-callout-title') {
+					base = cc;
+					alpha = 1;
+				}
+			} else if (cls === 'nm-quote') {
+				setA(fb);
+				setF(pal.qb);
+				ctx.fillRect(2, y - 0.5, 2, bh + 0.5);
+				base = pal.quote;
+				alpha = 0.85;
+			} else if (cls === 'nm-hr') {
+				base = pal.hr;
+				alpha = 1;
+			} else if (cls === 'nm-frontmatter') {
+				base = pal.faint;
+				alpha = 0.85;
 			}
-			const pct = Math.min(100, Math.max(8, (it.len / 80) * 100));
-			const left = it.indent ? Math.min(it.indent * 2, 16) : 0;
-			ctx.fillRect(left, top + r * ROW, (w * pct) / 100, LINE_H);
+			const runs = it.runs;
+			for (let j = 0; j < nr; j++) {
+				const yj = y + j * step;
+				if (yj > mapH) break;
+				const fy = j === 0 ? fb : fade(yj); // yj is y itself on the first row
+				if (fy <= 0) continue;
+				const rowW = j < nr - 1 ? full : nr === 1 ? full : full * 0.5;
+				setA(alpha * fy);
+				setF(base);
+				ctx.fillRect(left, yj, rowW, thick);
+				if (!runs) continue;
+				const c0 = j * cpr;
+				const c1 = c0 + cpr;
+				setA(fy);
+				for (let q = 0; q < runs.length; q += 3) {
+					const a = Math.max(runs[q], c0);
+					const b = Math.min(runs[q + 1], c1);
+					if (b <= a) continue;
+					const x = left + full * ((a - c0) / cpr);
+					const rw = Math.max(1, full * ((b - a) / cpr));
+					ctx.clearRect(x, yj, rw, thick);
+					setF(pal[runs[q + 2]] || pal.text);
+					ctx.fillRect(x, yj, rw, thick);
+				}
+			}
 		}
 		ctx.globalAlpha = 1;
 	}
@@ -3560,7 +4057,7 @@ class NoteMinimapPlugin extends Plugin {
 	pageTick(st, vpTop, vpH) {
 		const bub = this.settings.pageBubble;
 		const hap = this.settings.pageHaptics && CAN_BUZZ && Platform.isMobile;
-		if ((!bub && !hap) || st.dead) return;
+		if ((!bub && !hap) || st.dead || this.settings.hideScrollbar) return;
 		const y = st.pageY;
 		if (y === undefined) return;
 		const now = performance.now();
@@ -3638,15 +4135,32 @@ class NoteMinimapPlugin extends Plugin {
 		const tr = st.vpEl.getBoundingClientRect();
 		const sr = st.el.getBoundingClientRect();
 		const right = !st.el.hasClass('note-minimap-left');
-		const size = 38; // height of the pill
-		const gap = 10;
+		const size = 38; // height of the bubble
+		const mini = !st.el.hasClass('nm-scrollbar');
+		st.pageEl.toggleClass('nm-page-rect', mini); // minimap: a rounded rectangle; scrollbar: stays a pill
 		const e = st.pageEl.style;
-		if (right) {
-			e.left = 'auto';
-			e.right = Math.round(hr.right - tr.left + gap) + 'px';
+		if (mini) {
+			// The minimap's band lifts toward the note and swells while you drag it (see the dragging rules in the
+			// styles), and its rim and glow sit outside that. The bubble is put clear of all of it from the start,
+			// measured from the strip's layout place (which the lift does not move), so it never touches the band
+			// whether you drag or just scroll. 8 px of air is left beyond the rim.
+			const reserve = 8 + 4 + 3 + 8;
+			if (right) {
+				e.left = 'auto';
+				e.right = Math.round(st.host.clientWidth - st.el.offsetLeft + reserve) + 'px';
+			} else {
+				e.right = 'auto';
+				e.left = Math.round(st.el.offsetLeft + st.el.offsetWidth + reserve) + 'px';
+			}
 		} else {
-			e.right = 'auto';
-			e.left = Math.round(tr.right - hr.left + gap) + 'px';
+			const gap = 10;
+			if (right) {
+				e.left = 'auto';
+				e.right = Math.round(hr.right - tr.left + gap) + 'px';
+			} else {
+				e.right = 'auto';
+				e.left = Math.round(tr.right - hr.left + gap) + 'px';
+			}
 		}
 		e.setProperty('--nm-page-from', (right ? 1 : -1) * 30 + 'px'); // it starts at the bar and grows out of it
 		e.setProperty('--nm-page-origin', right ? 'right center' : 'left center');
@@ -3771,6 +4285,110 @@ class NoteMinimapPlugin extends Plugin {
 		this.pageTick(st, vpTop, vpH);
 	}
 
+	wakeMap(st) {
+		if (!st.awake) {
+			st.awake = true;
+			st.el.addClass('nm-awake');
+			this.unfoldGroove(st);
+		}
+		// This runs on every frame the note moves. Instead of cancelling and creating a timer each time, one timer is
+		// kept and the moment to settle is remembered; when the timer fires early (the note moved since), it waits
+		// again for what is left. The note settles 1.8 s after the last movement, as before.
+		st.sleepAt = performance.now() + 1800;
+		if (st.sleepT) return;
+		const arm = (ms) => {
+			st.sleepT = window.setTimeout(() => {
+				st.sleepT = 0;
+				if (st.dead) return;
+				const left = st.sleepAt - performance.now();
+				if (left > 4) return arm(left);
+				st.awake = false;
+				st.el.removeClass('nm-awake');
+				this.foldGroove(st);
+			}, ms);
+		};
+		arm(1800);
+	}
+
+	// Where the groove's three parts stand, as transforms, for "open" (the whole track) and "folded" (exactly the
+	// thumb's length and place). Everything is a translate or a scale, so the browser's graphics side runs the
+	// animation by itself, and the end caps only ever move; they are never stretched.
+	grooveShapes(st) {
+		const T = st.trackH;
+		const vh = st.vpH;
+		if (!(T > 0) || !(vh > 0) || T <= vh + 1) return null;
+		const r = this.barWidth() / 2;
+		const tt = Math.max(0, Math.min(T - vh, st.vpTop - st.arrow)); // thumb's top inside the groove
+		// The body overlaps each cap by half a pixel so no seam shows while the parts move on their own layers.
+		const bodyH = Math.max(1, T - 2 * r + 1);
+		const sy = Math.max(0.001, (vh - 2 * r + 1) / bodyH);
+		return {
+			body: ['translateY(0px) scaleY(1)', 'translateY(' + tt + 'px) scaleY(' + sy + ')'],
+			top: ['translateY(0px)', 'translateY(' + tt + 'px)'],
+			bot: ['translateY(0px)', 'translateY(' + (tt + vh - T) + 'px)'],
+		};
+	}
+
+	dropGroove(st) {
+		const g = st.groove;
+		if (!g || !g.anims) return;
+		for (const a of g.anims) a.cancel();
+		g.anims = null;
+	}
+
+	// Quiet: the groove closes in on the thumb from both ends (an even, slow-in slow-out glide), and fades out
+	// in the last part of the way. The thumb and the arrows stay.
+	foldGroove(st) {
+		const g = st.groove;
+		if (!g || !g.body.animate || !st.el.hasClass('nm-scrollbar')) return;
+		this.dropGroove(st);
+		const sh = this.grooveShapes(st);
+		if (!sh) return;
+		const dur = this.reducedMotion() ? 1 : 900;
+		const ease = 'cubic-bezier(0.65, 0, 0.35, 1)';
+		const o = { duration: dur, easing: ease, fill: 'forwards' };
+		g.anims = [
+			g.body.animate([{ transform: sh.body[0] }, { transform: sh.body[1] }], o),
+			g.top.animate([{ transform: sh.top[0] }, { transform: sh.top[1] }], o),
+			g.bot.animate([{ transform: sh.bot[0] }, { transform: sh.bot[1] }], o),
+			g.root.animate(
+				[{ opacity: 1, offset: 0 }, { opacity: 1, offset: 0.5, easing: 'cubic-bezier(0.4, 0, 0.6, 1)' }, { opacity: 0, offset: 1 }],
+				{ duration: dur, easing: 'linear', fill: 'forwards' }
+			),
+		];
+	}
+
+	// Waking: if the fold is still on its way, it simply turns around from wherever it has got to; if it has
+	// finished, the groove grows back out of the thumb's present place.
+	unfoldGroove(st) {
+		const g = st.groove;
+		if (!g || !g.anims || !g.body.animate) return;
+		const running = g.anims[0].playState === 'running';
+		if (running) {
+			const list = g.anims;
+			for (const a of list) a.reverse();
+			list[0].onfinish = () => {
+				if (g.anims === list) this.dropGroove(st);
+			};
+			return;
+		}
+		this.dropGroove(st);
+		const sh = this.grooveShapes(st);
+		if (!sh) return;
+		const dur = this.reducedMotion() ? 1 : 700;
+		const o = { duration: dur, easing: 'cubic-bezier(0.16, 1, 0.3, 1)', fill: 'none' };
+		const list = [
+			g.body.animate([{ transform: sh.body[1] }, { transform: sh.body[0] }], o),
+			g.top.animate([{ transform: sh.top[1] }, { transform: sh.top[0] }], o),
+			g.bot.animate([{ transform: sh.bot[1] }, { transform: sh.bot[0] }], o),
+			g.root.animate([{ opacity: 0, offset: 0 }, { opacity: 1, offset: 0.35 }, { opacity: 1, offset: 1 }], { duration: dur, easing: 'linear', fill: 'none' }),
+		];
+		g.anims = list;
+		list[0].onfinish = () => {
+			if (g.anims === list) this.dropGroove(st);
+		};
+	}
+
 	updateViewport(st, livePos) {
 		const sc = st.scroller;
 		const s = this.settings;
@@ -3814,12 +4432,20 @@ class NoteMinimapPlugin extends Plugin {
 		// While you drag the thumb it stays glued to your finger; the note catches up.
 		const shown = sb && st.lead ? st.target : live ? livePos : sc.scrollTop;
 		st.pageY = shown;
+		// The minimap wakes while the note moves (fuller, brighter) and settles back to a calm resting look after.
+		{
+			const ry = Math.round(shown);
+			if (st.awakeY !== ry) {
+				st.awakeY = ry;
+				this.wakeMap(st);
+			}
+		}
 		const frac = Math.min(1, Math.max(0, shown / maxView));
 		const e = st.el.style;
 
 		if (sb) {
 			// Same maths as a native scrollbar thumb.
-			const a = s.showArrows && s.touchEnabled ? s.arrowSize : 0;
+			const a = s.showArrows ? s.arrowSize : 0;
 			const trackH = Math.max(1, mapH - 2 * a);
 			let vpH = Math.min(trackH, Math.max(44, (ch / shV) * trackH));
 			// Resizing the thumb means laying it out and redrawing it. While a long note scrolls, its height
@@ -3861,10 +4487,12 @@ class NoteMinimapPlugin extends Plugin {
 
 		// Custom properties set on the strip are inherited by every bar (up to 3000), so changing
 		// them each frame would restyle all of them. Transforms on the two moving parts do not.
+		st.curSh = sh;
 		if (st.canvas) this.drawMap(st, mapH);
 		else st.linesEl.style.transform = 'translate3d(0,' + st.stripTop + 'px,0)';
 		this.placeThumb(st, vpTop, vpH);
-		// The dimming overlays only exist while the strip is being dragged.
+		// The dimming overlays follow the band while the strip is dragged (they are slid by these two values, and fade
+		// out holding the last ones when the drag ends).
 		if (st.dragging) {
 			e.setProperty('--nm-fade-top', vpTop + 'px');
 			e.setProperty('--nm-fade-bot', vpTop + vpH + 'px');
@@ -4264,7 +4892,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl).setName('Controls').setHeading();
 
-		new Setting(containerEl)
+		const touchSet = new Setting(containerEl)
 			.setName('Touch controls')
 			.setDesc('Turn off to let touches pass through to the note. The bar then only shows where you are.')
 			.addToggle((t) =>
@@ -4274,9 +4902,9 @@ class MinimapSettingTab extends PluginSettingTab {
 				})
 			);
 
-		new Setting(containerEl)
+		const hideSet = new Setting(containerEl)
 			.setName('Hide scrollbar')
-			.setDesc('Hide the bar and give the note the full width.')
+			.setDesc('Hide the bar and its arrow buttons and give the note the full width.')
 			.addToggle((t) =>
 				t.setValue(p.settings.hideScrollbar).onChange(async (v) => {
 					p.settings.hideScrollbar = v;
@@ -4284,7 +4912,7 @@ class MinimapSettingTab extends PluginSettingTab {
 				})
 			);
 
-		new Setting(containerEl)
+		const btnSet = new Setting(containerEl)
 			.setName('Header button')
 			.setDesc('Add a hand button to the note header. Tap it to turn touch on or off. Long-press it to hide or show the bar.')
 			.addToggle((t) =>
@@ -4293,6 +4921,17 @@ class MinimapSettingTab extends PluginSettingTab {
 					await p.saveSettings();
 				})
 			);
+
+		// These three read differently for the scrollbar and the minimap, so they follow the style.
+		const syncNames = (style) => {
+			const mini = style === 'minimap';
+			const nm = mini ? 'minimap' : 'scrollbar';
+			touchSet.setDesc('Turn off to let touches pass through to the note. The ' + (mini ? 'minimap' : 'bar') + ' then only shows where you are.' + (mini ? '' : ' The arrow buttons stay, if they are on.'));
+			hideSet.setName('Hide ' + nm);
+			hideSet.setDesc(mini ? 'Hide the minimap and give the note the full width.' : 'Hide the bar and give the note the full width. The arrow buttons stay, if they are on.');
+			btnSet.setDesc('Add a hand button to the note header. Tap it to turn touch on or off. Long-press it to hide or show the ' + nm + '.');
+		};
+		syncNames(p.settings.style);
 
 		new Setting(containerEl).setName('Look').setHeading();
 
@@ -4307,6 +4946,7 @@ class MinimapSettingTab extends PluginSettingTab {
 					.setValue(p.settings.style)
 					.onChange(async (v) => {
 						p.settings.style = v;
+						syncNames(v);
 						this.setFold(styleFolds.sb && styleFolds.sb.wrap, v === 'scrollbar');
 						this.setFold(styleFolds.mm && styleFolds.mm.wrap, v !== 'scrollbar');
 						await p.saveSettings();
@@ -4573,8 +5213,11 @@ class MinimapSettingTab extends PluginSettingTab {
 				);
 
 			slider('Width', 'How wide the minimap is, as a % of the note.', 'width', 3, 30, 1);
-			slider('Top offset', 'How far down from the top it starts, in %.', 'top', 0, 50, 1);
-			slider('Height', 'How tall the minimap is, as a % of the note.', 'height', 20, 100, 5);
+			slider('Minimap edge margin', 'Space between the minimap and the screen edge, in pixels.', 'mapEdge', 0, 40, 1);
+			slider('Minimap top margin', 'Space between the header and the top of the minimap, in pixels. Automatic is measured on your device, so it fits any screen.', 'mapTop', 0, 200, 1);
+			slider('Minimap bottom margin', 'Space between the bottom bar and the bottom of the minimap, in pixels. Automatic is measured on your device.', 'mapBottom', 0, 200, 1);
+			slider('Top offset', 'How far down it starts, as a % of the space between the header and the bottom bar. 0 starts right under the header.', 'top', 0, 50, 1);
+			slider('Height', 'How tall the minimap is, as a % of that space. 100 fills it.', 'height', 20, 100, 5);
 		
 		}
 		host = containerEl;
@@ -4594,6 +5237,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		const smoothFold = fold(p.settings.smooth);
 		slider('Glide length', 'How long the glide lasts, in milliseconds. Longer is softer.', 'smoothMs', 80, 800, 20, undefined, smoothFold.inner);
+		slider('Ignore small movements', 'While you hold the scrollbar or minimap, movement smaller than this many pixels is ignored, so a resting finger that drifts a little does not move the note. Once you move further, it follows you as normal. 0 turns it off.', 'dragSlop', 0, 24, 1);
 
 		{
 			const cur = p.settings.refreshRate || 0;

@@ -35,60 +35,88 @@
 }
 
 .note-minimap.note-minimap-left {
-	left: 0;
+	left: var(--nm-edge, 0px);
 	right: auto;
 }
 
 .note-minimap.note-minimap-right {
 	left: auto;
-	right: 0;
+	right: var(--nm-edge, 0px);
+}
+/* The minimap stretches between the header and the bottom bar (the scrollbar sizes itself instead). */
+.note-minimap:not(.nm-scrollbar) {
+	bottom: var(--nm-bottom, auto);
 }
 
 .note-minimap.note-minimap-dragging {
 	overflow: visible;
 }
 
-/* Long-press on the header button hides the whole strip. */
-.note-minimap-host .note-minimap.nm-hidden {
-	display: none;
-}
+/* Long-press on the header button hides the whole strip (it slides and fades away; see Motion below). */
 
-/* Touch switched off: display-only, touches fall through to the note. */
+/* Touch switched off: the bar is display-only, touches fall through to the note. */
 .note-minimap.nm-touch-off,
 .note-minimap.nm-touch-off * {
 	pointer-events: none;
 }
 
-.note-minimap.nm-scrollbar.nm-has-arrows.nm-touch-off .nm-arrow,
-.note-minimap.nm-touch-off .nm-arrow {
-	display: none;
+/* ...except the arrow buttons, which stay and keep working (the scrollbar style's arrows, when they are on). */
+.note-minimap.nm-scrollbar.nm-touch-off .nm-arrow {
+	pointer-events: auto;
 }
 
 /* ---- Minimap style ----
    While dragging, everything outside the visible band is dimmed by two background-coloured
    overlays (no CSS masks). --nm-fade-top / --nm-fade-bot are set on the strip by the script. */
-.note-minimap.note-minimap-dragging::before,
-.note-minimap.note-minimap-dragging::after {
+.note-minimap:not(.nm-scrollbar) .nm-clip::before,
+.note-minimap:not(.nm-scrollbar) .nm-clip::after {
 	content: "";
 	position: absolute;
 	left: 0;
 	right: 0;
+	top: 0;
+	height: 100%;
 	z-index: 2;
 	pointer-events: none;
+	background: var(--background-primary);
+	opacity: 0;
+	will-change: transform, opacity;
+	transition: opacity 0.5s var(--nm-e-soft, ease);
 }
 
-.note-minimap.note-minimap-dragging::before {
-	top: 0;
-	height: var(--nm-fade-top, 0px);
-	background: var(--background-primary);
-	opacity: 0.85;
+/* Each overlay is as tall as the strip and is only slid into place (a transform, so nothing is laid out or
+   repainted as you drag): the top one ends at the band's top edge, the bottom one starts at its bottom edge. */
+.note-minimap:not(.nm-scrollbar) .nm-clip::before {
+	transform: translateY(calc(var(--nm-fade-top, 0px) - 100%));
 }
 
-.note-minimap.note-minimap-dragging::after {
-	top: var(--nm-fade-bot, 100%);
-	bottom: 0;
-	background: var(--background-primary);
-	opacity: 0.85;
+.note-minimap:not(.nm-scrollbar) .nm-clip::after {
+	transform: translateY(var(--nm-fade-bot, 100%));
+}
+
+.note-minimap:not(.nm-scrollbar).note-minimap-dragging .nm-clip::before,
+.note-minimap:not(.nm-scrollbar).note-minimap-dragging .nm-clip::after {
+	opacity: 0.9;
+	transition-duration: 0.3s;
+	transition-timing-function: var(--nm-e-out, ease-out);
+}
+
+/* Clips the picture (and its dimming) to the panel's rounded shape. Not a layer of its own for the scrollbar. */
+.nm-clip {
+	position: absolute;
+	inset: 0;
+	overflow: hidden;
+	border-radius: inherit;
+	/* overflow + border-radius alone does not clip children that sit on their own graphics layer (the canvas, the
+	   moving lines): their square corners poke out. A clip-path does clip them. */
+	clip-path: inset(0 round 12px);
+	isolation: isolate;
+	pointer-events: none;
+	z-index: 0;
+}
+
+.note-minimap.nm-scrollbar .nm-clip {
+	display: contents;
 }
 
 /* Moved with a transform; its own layer keeps the dimming overlays from flickering. contain keeps
@@ -126,20 +154,199 @@
 	will-change: transform;
 }
 
+/* ---- Motion ----
+   One set of curves for everything that moves, so it all feels like one hand made it: arriving things slow
+   down into place (out), things travelling glide (in-out), and fades are soft. Nothing below animates layout or
+   paint: only transform, translate, scale and opacity, which the graphics side runs by itself. Shadows and glows
+   are layers whose opacity changes, never box-shadows being tweened. */
+.note-minimap {
+	--nm-e-out: cubic-bezier(0.16, 1, 0.3, 1);
+	--nm-e-io: cubic-bezier(0.65, 0, 0.35, 1);
+	--nm-e-soft: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.note-minimap.note-minimap-left { --nm-slide: -16px; --nm-lift: 8px; }
+.note-minimap.note-minimap-right { --nm-slide: 16px; --nm-lift: -8px; }
+
+/* ---- Minimap polish ----
+   The strip is a panel that belongs to the note: rounded, softly lit, with a hairline edge. It rests a little
+   quieter, wakes while you scroll or touch it, and slides in from its edge when it first appears. */
+.note-minimap:not(.nm-scrollbar) {
+	border-radius: 12px;
+	background: var(--background-secondary);
+	opacity: 0.92;
+	/* The strip itself never clips: the picture is clipped by its own layer, so the visible band (and its outline)
+	   stays whole when it sits at the very top or bottom of the strip. */
+	overflow: visible;
+	/* How far a glow may reach. It must not be wider than the gap to the screen edge, or the screen cuts it off on
+	   that side only and the glow looks lopsided; a drag also lifts the strip a few pixels inward for extra room. */
+	--nm-reach: max(4px, var(--nm-edge, 12px));
+	/* Settling back to rest is slow and soft; waking up (below) is quick. */
+	transition: opacity 0.9s var(--nm-e-soft), translate 0.6s var(--nm-e-out);
+	animation: nm-map-in 0.9s var(--nm-e-out) backwards;
+}
+
+/* The panel's lighting, as two layers behind the picture: the resting edge and shadow, and the lit edge with
+   its glow, which fades in over the first while you drag. */
+.note-minimap:not(.nm-scrollbar)::before,
+.note-minimap:not(.nm-scrollbar)::after {
+	content: '';
+	position: absolute;
+	inset: 0;
+	border-radius: inherit;
+	pointer-events: none;
+	z-index: -1;
+}
+
+.note-minimap:not(.nm-scrollbar)::before {
+	box-shadow: inset 0 0 0 1px var(--background-modifier-border), 0 6px 18px rgba(0, 0, 0, 0.25);
+}
+
+.note-minimap:not(.nm-scrollbar)::after {
+	opacity: 0;
+	box-shadow: inset 0 0 0 1px var(--text-accent), 0 10px 16px rgba(0, 0, 0, 0.4), 0 0 var(--nm-reach) color-mix(in srgb, var(--text-accent) 24%, transparent);
+	transition: opacity 0.6s var(--nm-e-soft);
+}
+
+.note-minimap:not(.nm-scrollbar).nm-awake,
+.note-minimap:not(.nm-scrollbar).note-minimap-dragging {
+	opacity: 1;
+	transition-duration: 0.3s;
+	transition-timing-function: var(--nm-e-out);
+}
+
+.note-minimap:not(.nm-scrollbar).note-minimap-dragging {
+	translate: var(--nm-lift, 0px) 0;
+}
+
+.note-minimap:not(.nm-scrollbar).note-minimap-dragging::after {
+	opacity: 1;
+	transition-duration: 0.3s;
+	transition-timing-function: var(--nm-e-out);
+}
+
+/* The picture of the note fades in just after the panel arrives. */
+.note-minimap:not(.nm-scrollbar) .note-minimap-lines,
+.note-minimap:not(.nm-scrollbar) .note-minimap-canvas {
+	animation: nm-lines-in 1s var(--nm-e-out) 0.15s backwards;
+}
+
+@keyframes nm-map-in {
+	from { opacity: 0; translate: var(--nm-slide, 16px) 0; scale: 0.94 0.985; }
+}
+
+@keyframes nm-lines-in {
+	from { opacity: 0; }
+}
+
+/* Hiding and showing: the strip slides out toward its edge as it fades, and comes back the same way, instead of
+   vanishing. (Before this it was display:none, which cannot animate.) The scrollbar's strip, which has no
+   entrance of its own, gets the same easing for coming back. */
+.note-minimap.nm-scrollbar:not(.nm-hidden) {
+	transition: opacity 0.5s var(--nm-e-out), translate 0.55s var(--nm-e-out);
+}
+
+.note-minimap-host .note-minimap.nm-hidden {
+	opacity: 0;
+	translate: var(--nm-slide, 16px) 0;
+	visibility: hidden;
+	pointer-events: none;
+	transition: opacity 0.35s var(--nm-e-soft), translate 0.5s var(--nm-e-io), visibility 0s linear 0.5s;
+}
+
+/* The visible band: a glass window with a lit edge, not a flat grey block. Needs color-mix; older webviews
+   keep the plain translucent block above. Its glows are layers that fade; its swell is a scale. */
+@supports (color: color-mix(in srgb, red, blue)) {
+	.note-minimap:not(.nm-scrollbar) .note-minimap-viewport {
+		opacity: 1;
+		border-radius: 10px;
+		background: color-mix(in srgb, var(--text-accent) 16%, transparent);
+		border: 1px solid color-mix(in srgb, var(--text-accent) 55%, transparent);
+		box-shadow: 0 0 0 1px color-mix(in srgb, var(--background-primary) 55%, transparent);
+		z-index: 3;
+		transition: background 0.5s var(--nm-e-soft), border-color 0.5s var(--nm-e-soft), scale 0.45s var(--nm-e-out);
+	}
+	.note-minimap:not(.nm-scrollbar) .note-minimap-viewport::before,
+	.note-minimap:not(.nm-scrollbar) .note-minimap-viewport::after {
+		content: '';
+		position: absolute;
+		inset: -1px;
+		border-radius: inherit;
+		pointer-events: none;
+	}
+	.note-minimap:not(.nm-scrollbar) .note-minimap-viewport::before {
+		box-shadow: 0 0 18px color-mix(in srgb, var(--text-accent) 32%, transparent);
+		opacity: 0.6;
+		transition: opacity 0.6s var(--nm-e-soft);
+	}
+	.note-minimap:not(.nm-scrollbar) .note-minimap-viewport::after {
+		/* Both sides get the same reach, so the glow is even all the way round. */
+		box-shadow:
+			inset 0 0 0 1px rgba(255, 255, 255, 0.28),
+			0 0 0 1px var(--text-accent),
+			0 0 0 3px color-mix(in srgb, var(--background-primary) 70%, transparent),
+			0 0 0 4px color-mix(in srgb, var(--text-accent) 45%, transparent),
+			0 0 var(--nm-reach) 2px color-mix(in srgb, var(--text-accent) 60%, transparent);
+		opacity: 0;
+		transition: opacity 0.4s var(--nm-e-soft);
+	}
+	.note-minimap:not(.nm-scrollbar).nm-awake .note-minimap-viewport {
+		background: color-mix(in srgb, var(--text-accent) 24%, transparent);
+		border-color: color-mix(in srgb, var(--text-accent) 80%, transparent);
+	}
+	.note-minimap:not(.nm-scrollbar).nm-awake .note-minimap-viewport::before {
+		opacity: 1;
+		transition-duration: 0.3s;
+	}
+	/* While you drag, the band is the star: it swells past the panel's edges, fills with accent, gets a bright
+	   rim and a wide glow, and everything outside it is dimmed. */
+	.note-minimap:not(.nm-scrollbar).note-minimap-dragging .note-minimap-viewport {
+		scale: 1.08 1;
+		background: color-mix(in srgb, var(--text-accent) 38%, transparent);
+		border-color: var(--text-accent);
+		transition-duration: 0.3s;
+	}
+	.note-minimap:not(.nm-scrollbar).note-minimap-dragging .note-minimap-viewport::after {
+		opacity: 1;
+		transition-duration: 0.3s;
+		transition-timing-function: var(--nm-e-out);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.note-minimap,
+	.note-minimap:not(.nm-scrollbar),
+	.note-minimap:not(.nm-scrollbar)::after,
+	.note-minimap:not(.nm-scrollbar) .note-minimap-lines,
+	.note-minimap:not(.nm-scrollbar) .note-minimap-canvas,
+	.note-minimap:not(.nm-scrollbar) .nm-clip::before,
+	.note-minimap:not(.nm-scrollbar) .nm-clip::after,
+	.note-minimap:not(.nm-scrollbar) .note-minimap-viewport,
+	.note-minimap:not(.nm-scrollbar) .note-minimap-viewport::before,
+	.note-minimap:not(.nm-scrollbar) .note-minimap-viewport::after,
+	.note-minimap.nm-scrollbar:not(.nm-hidden),
+	.note-minimap-host .note-minimap.nm-hidden {
+		animation: none;
+		transition: none;
+	}
+}
+
 .note-minimap-line.nm-blank { background: transparent; }
-.note-minimap-line.nm-text { background: var(--text-normal); opacity: 0.35; }
-.note-minimap-line.nm-h1 { background: #e06c75; }
-.note-minimap-line.nm-h2 { background: #d19a66; }
-.note-minimap-line.nm-h3 { background: #e5c07b; }
-.note-minimap-line.nm-h4 { background: #98c379; }
-.note-minimap-line.nm-h5 { background: #56b6c2; }
-.note-minimap-line.nm-h6 { background: #61afef; }
-.note-minimap-line.nm-code { background: #61afef; opacity: 0.55; }
-.note-minimap-line.nm-quote { background: #c678dd; opacity: 0.6; }
-.note-minimap-line.nm-list { background: #98c379; opacity: 0.6; }
-.note-minimap-line.nm-hr { background: #d19a66; opacity: 0.7; }
-.note-minimap-line.nm-em { background: #e5c07b; opacity: 0.6; }
-.note-minimap-line.nm-frontmatter { background: #9aa5b1; opacity: 0.75; }
+.note-minimap-line.nm-text { background: var(--nm-c-text, var(--text-normal)); opacity: 0.7; }
+.note-minimap-line.nm-h1 { background: var(--nm-c-h1, var(--text-normal)); }
+.note-minimap-line.nm-h2 { background: var(--nm-c-h2, var(--text-normal)); }
+.note-minimap-line.nm-h3 { background: var(--nm-c-h3, var(--text-normal)); }
+.note-minimap-line.nm-h4 { background: var(--nm-c-h4, var(--text-normal)); }
+.note-minimap-line.nm-h5 { background: var(--nm-c-h5, var(--text-normal)); }
+.note-minimap-line.nm-h6 { background: var(--nm-c-h6, var(--text-normal)); }
+.note-minimap-line.nm-code { background: var(--nm-c-code, var(--text-normal)); opacity: 0.9; }
+.note-minimap-line.nm-quote { background: var(--nm-c-quote, var(--text-normal)); opacity: 0.85; }
+.note-minimap-line.nm-callout-title { background: var(--nm-c-tag, var(--text-accent)); }
+.note-minimap-line.nm-callout { background: var(--nm-c-text, var(--text-normal)); opacity: 0.7; }
+.note-minimap-line.nm-list { background: var(--nm-c-text, var(--text-normal)); opacity: 0.7; }
+.note-minimap-line.nm-hr { background: var(--nm-c-hr, var(--text-faint)); }
+.note-minimap-line.nm-em { background: var(--nm-c-b, var(--text-normal)); opacity: 0.85; }
+.note-minimap-line.nm-frontmatter { background: var(--nm-c-faint, var(--text-faint)); opacity: 0.85; }
 
 /* ---- Fast rendering ---- */
 /* The canvas minimap: one element that fills the strip, painted from script. */
@@ -201,28 +408,55 @@
 	box-shadow: var(--nm-thumb-shadow-active, none);
 }
 
-/* While the bar is being dragged, the groove steps aside (the minimap's dimming overlays share these two
-   pseudo-elements, so they are switched off explicitly rather than by accident of their height). */
-.note-minimap.nm-scrollbar.note-minimap-dragging::before,
-.note-minimap.nm-scrollbar.note-minimap-dragging::after {
+/* The faint groove between the arrows: a body with a round cap at each end. While the note moves or you touch the
+   bar it is the whole track; when things go quiet the script folds it in to the thumb (see foldGroove), and it
+   steps aside while the bar is dragged. Only transform and opacity ever animate, so it stays smooth. */
+.nm-groove {
 	display: none;
-}
-
-/* The faint groove between the arrows. */
-.note-minimap.nm-scrollbar::before {
-	content: '';
 	position: absolute;
 	top: var(--nm-arrow-gap, 0px);
 	bottom: var(--nm-arrow-gap, 0px);
 	width: var(--nm-thumb, 18px);
-	background: var(--background-modifier-border);
-	opacity: var(--nm-track-opacity, 0);
-	border-radius: var(--nm-thumb-radius, 999px);
 	pointer-events: none;
+	will-change: opacity;
 }
 
-.note-minimap.nm-scrollbar.note-minimap-right::before { right: 3px; }
-.note-minimap.nm-scrollbar.note-minimap-left::before { left: 3px; }
+.note-minimap.nm-scrollbar .nm-groove { display: block; }
+.note-minimap.nm-scrollbar.note-minimap-dragging .nm-groove { display: none; }
+.note-minimap.nm-scrollbar.note-minimap-right .nm-groove { right: 3px; }
+.note-minimap.nm-scrollbar.note-minimap-left .nm-groove { left: 3px; }
+
+.nm-groove-in {
+	position: absolute;
+	inset: 0;
+	opacity: var(--nm-track-opacity, 0);
+}
+
+.nm-groove-in > div {
+	position: absolute;
+	left: 0;
+	right: 0;
+	background: var(--background-modifier-border);
+	will-change: transform;
+}
+
+.nm-g-top {
+	top: 0;
+	height: calc(var(--nm-thumb, 18px) / 2 + 0.5px);
+	border-radius: var(--nm-thumb-radius, 999px) var(--nm-thumb-radius, 999px) 0 0;
+}
+
+.nm-g-bot {
+	bottom: 0;
+	height: calc(var(--nm-thumb, 18px) / 2 + 0.5px);
+	border-radius: 0 0 var(--nm-thumb-radius, 999px) var(--nm-thumb-radius, 999px);
+}
+
+.nm-g-body {
+	top: calc(var(--nm-thumb, 18px) / 2 - 0.5px);
+	bottom: calc(var(--nm-thumb, 18px) / 2 - 0.5px);
+	transform-origin: 50% 0;
+}
 
 /* The whole note fits on screen: nothing to scroll, so the bar and arrows rest quietly. */
 .note-minimap.nm-scrollbar.nm-no-scroll .note-minimap-viewport {
@@ -1340,6 +1574,12 @@ html body.nm-hold-lite.nm-hold-lite .workspace-tab-header-container {
 	transform: translate3d(var(--nm-page-from, 30px), 0, 0) scale(0.2);
 	scale: 0;
 	transition: transform 0.14s cubic-bezier(0.5, 0, 1, 0.6), opacity 0.12s linear;
+}
+
+/* Beside the minimap the bubble is a rounded rectangle, in step with the panel's own rounded corners. */
+.nm-page.nm-page-rect .nm-page-b {
+	border-radius: 13px;
+	padding: 0 15px;
 }
 
 /* The shadow lives on its own layer so that fading it out is only an opacity change (no repainting of the shadow
