@@ -96,7 +96,7 @@
 
 .note-minimap:not(.nm-scrollbar).note-minimap-dragging .nm-clip::before,
 .note-minimap:not(.nm-scrollbar).note-minimap-dragging .nm-clip::after {
-	opacity: 0.9;
+	opacity: 0.5;
 	transition-duration: 0.3s;
 	transition-timing-function: var(--nm-e-out, ease-out);
 }
@@ -409,8 +409,8 @@
 }
 
 /* The faint groove between the arrows: a body with a round cap at each end. While the note moves or you touch the
-   bar it is the whole track; when things go quiet the script folds it in to the thumb (see foldGroove), and it
-   steps aside while the bar is dragged. Only transform and opacity ever animate, so it stays smooth. */
+   bar it is the whole track; when things go quiet the script fades it out in place, and fades it back in when the
+   note moves again (see foldGroove). It steps aside while the bar is dragged. Only opacity animates. */
 .nm-groove {
 	display: none;
 	position: absolute;
@@ -1606,26 +1606,8 @@ html body.nm-hold-lite.nm-hold-lite .workspace-tab-header-container {
 		scale 0s;
 }
 
-/* Leaving: the pill keeps its shape and shrinks, numbers and all, toward its edge next to the bar (the transform
-   origin), first to about half size and then away to nothing. That edge stays where it is, so it never reaches the bar. */
-.nm-page-on.nm-page-fade .nm-page-b {
-	/* First it settles into the look the thumb has when it is not being used (its resting opacity, no shadow;
-	   the number stays), and the shrink starts at once, so it is one continuous motion. */
-	opacity: var(--nm-page-idle-op, 0.75);
-	animation: nm-page-close 0.46s linear forwards;
-	transition: opacity 0.3s ease-out, scale 0s;
-	will-change: scale, opacity;
-}
-
-.nm-page-on.nm-page-fade .nm-page-b::before {
-	opacity: 0;
-}
-
-@keyframes nm-page-close {
-	0% { scale: 1; animation-timing-function: cubic-bezier(0.4, 0, 0.3, 1); }
-	55% { scale: 0.5; animation-timing-function: cubic-bezier(0.6, 0, 0.9, 0.5); }
-	100% { scale: 0; }
-}
+/* Leaving and coming back are driven from script (pageHide and pageKeep): one continuous shrink and fade that can
+   turn around from wherever it has got to, so no rules for a "leaving" state are needed here. */
 
 .nm-page-n,
 .nm-page-of {
@@ -1650,12 +1632,6 @@ html body.nm-hold-lite.nm-hold-lite .workspace-tab-header-container {
 		scale: 1;
 		animation: none;
 		transition: opacity 0.1s linear;
-	}
-
-	/* The leaving state sets the close animation with a more specific selector, so the reset is matched to it here
-	   (only the animation: the fade state's own transition stays exactly as it was). */
-	.nm-page-on.nm-page-fade .nm-page-b {
-		animation: none;
 	}
 }
 

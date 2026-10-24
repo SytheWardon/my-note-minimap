@@ -1,282 +1,85 @@
 # My Note Minimap [Scrollbar]
 
-An [Obsidian](https://obsidian.md) plugin that adds a colour-coded minimap or scrollbar beside each markdown note, with click-and-drag navigation. Works on desktop and mobile.
+An [Obsidian](https://obsidian.md) plugin that adds a scrollbar or a colour-coded minimap beside each note, so you can see where you are and jump around fast. Works on desktop and mobile.
 
-## Contents
+## What you get
 
-- [Features](#features)
-- [Installation](#installation)
-- [Using it](#using-it): [arrows](#using-the-arrows), [touch button](#touch-button), [pages and the page bubble](#pages-and-the-page-bubble)
-- [Settings reference](#settings-reference): every setting, with defaults
-- [Commands](#commands)
-- [How it works](#how-it-works): [refresh rate](#screen-refresh-rate), [minimap colours](#minimap-colours), [look and motion](#look-and-motion), [performance](#performance), [faster loading](#faster-loading-and-smoother-holding), [bar animation](#header-and-bottom-bar-animation), [first-run setup](#first-run-setup-phone-or-tablet-only), [diagnostics](#scroll-diagnostics)
-- [Network use and privacy](#network-use-and-privacy)
-- [Version history](#version-history)
+- **Two styles.** *Scrollbar* is a thin, smooth bar. *Minimap* is a small coloured picture of your whole note, with a band showing where you are. Pick one under **Style**.
+- **Drag or tap to jump** anywhere in a long note.
+- **Arrow buttons** (scrollbar style): tap to jump to the next or previous heading, hold to keep scrolling.
+- **Page bubble:** while you scroll, a small bubble shows where you are, like *3 of 12* or a percent.
+- **Page vibration** on phones: a light buzz as you cross into a new page.
+- **Easy to restyle:** bar colour, width, shape, opacity, glow, and which side it sits on. The bar width adapts to your screen by default.
+- **Smooth motion:** the bubble and the bar's track fade in and out together, and the top and bottom bars can slide away while you scroll.
+- **Fits your device:** margins scale with your screen, so nothing sits under notches, the header buttons or the bottom bar.
 
-## Features
+## Install
 
-- Two styles: **scrollbar** (light and smooth) or **minimap** (a full colour picture of the note, built to be performance-driven; see [Performance](#performance)). The minimap sits beside the note like the scrollbar does, below the header and above the bottom bar, and is coloured from your theme (see [Minimap colours](#minimap-colours)).
-- **Performance-driven minimap:** the minimap is designed around speed first. It is painted on a single canvas, only the part of the picture you can see is ever drawn, it redraws only when something actually changed, and it stays out of the way while you type or while a note is in a background tab. Long notes cost no more to show than short ones. See [Performance](#performance) for how each of these works.
-- Click and drag to jump around long notes. Touch works on mobile. The minimap is accurate to the note: every line sits where it really is, so the bars line up with the thumb and with what is on screen.
-- Up/down **arrow buttons** (on by default): tap to jump to the next or previous heading (or scroll one step), hold to keep scrolling.
-- **Page bubble**: shows where you are in a long note while you scroll: the page (*3 of 12*), or percent read.
-- **Page vibration** on phones and tablets: a light buzz as you cross into another page, or as the percent changes.
-- Customise the thumb's colour, width, shape (pill, rounded, square), opacity, track and glow, and choose which side it sits on. Bar width is **automatic** by default and adapts to your screen.
-- **Animated top and bottom bars**: they slide and/or fade away while you scroll.
-- A settings page grouped into clear sections, with **+ / − buttons** and a live number on every slider, and a **reset** button for each group.
-- A hand-icon **touch button** in the note's top menu: tap to turn touch on or off, long-press to hide the scrollbar or minimap. Its messages say which one you are using. With the scrollbar and arrows on, turning touch off leaves the two arrow buttons in place and working; hiding the bar hides the arrows with it.
-- Per-device margins for notches and rounded corners. The minimap measures your header and bottom bar and keeps clear of them on any screen (or set its top, bottom and edge margins yourself).
-- Smooth, consistent motion: the minimap panel slides in and wakes as you scroll, the band lights up as you drag, the scrollbar's groove folds into the thumb when idle, and hiding or showing slides and fades. See [Look and motion](#look-and-motion).
-- Option to hide on mobile, plus exclusions for files and folders.
-- Optional, off-by-default update check (see [Network use and privacy](#network-use-and-privacy)).
-
-## Installation
-
-- **Community list:** Settings → Community plugins → Browse → search "My Note Minimap" → Install → Enable.
-- **Manually:** download `main.js`, `manifest.json` and `styles.css` from the latest [release](../../releases) into `<your vault>/.obsidian/plugins/my-note-minimap/`, then enable it under Community plugins.
+- **From Obsidian:** Settings → Community plugins → Browse → search "My Note Minimap" → Install → Enable.
+- **By hand:** put `main.js`, `manifest.json` and `styles.css` from the latest [release](../../releases) into `<your vault>/.obsidian/plugins/my-note-minimap/`, then enable the plugin.
 
 ## Using it
 
-### Using the arrows
+**The minimap.** The coloured bars are your note's lines: headings, lists, quotes, code and callouts each get their theme colour. The lit band is where you are, and it is always the same size. Touch or drag the minimap to go there. While you hold the band, the rest of the minimap dims a little.
 
-The arrows sit at the top and bottom of the scrollbar.
+**The arrows.** Tap an arrow to jump to the next or previous heading (or scroll a step, if you change *Arrow tap does*). Hold it for about half a second to keep scrolling; the speed is *Hold speed*.
 
-- **Tap** does what *Arrow tap does* says. By default it **jumps to the next or previous heading**; a note with no heading that way scrolls one step instead. You can also set it to scroll a fixed step (set the distance with *Step per tap*). You can tap anywhere in the scrollbar column beside the arrow, not just the icon, and each arrow's tap area is 52 px tall by default (change it with *Arrow size*).
-- **Press and hold** (about half a second) to keep scrolling. It eases up to full speed (set with *Hold speed*, default 200 px/s). Holding always scrolls, whatever *Arrow tap does* is set to.
-- While held, the arrow glides into a pill-shaped highlight and bobs in the direction of travel at a pace that follows *Hold speed*. It slides back when you let go.
-- At the very top or bottom of a note the arrow gives a small bump instead of scrolling.
-- Turn the arrows off or resize them under *Arrow buttons*.
+**The hand button** in the note's top menu: tap it to turn touch on or off. Long-press it to hide or show the whole bar or minimap.
 
-### Touch button
+**Pages.** Long notes are split into pages by text length (1800 characters each by default), not by screen size, so rotating or unfolding your phone never changes them. The bubble shows the page you are on while you scroll, then shrinks away a moment after you stop.
 
-- **Tap** the hand icon in a note's top menu to turn the scrollbar's touch on or off. When off, the strip only shows where you are, and touches go to the note. The button is highlighted while touch is on.
-- **Long-press** (about half a second) to hide or show the whole scrollbar or minimap. While hidden, the icon shows a cut-out with a small eye-with-a-slash. With the scrollbar and its arrows on, hiding removes the bar but the two arrow buttons stay (as they do when touch is turned off); the minimap hides completely.
-- The same switches are under *Touch controls* and *Hide scrollbar*. Hide the button itself with *Header button*. If the top menu is full, it may move into the three-dot menu.
+## Settings
 
-### Pages and the page bubble
+Open **Settings → My Note Minimap [Scrollbar]**. Every slider has − and + buttons and a reset button for its group.
 
-Long notes are split into **pages**. While you scroll, a small **page bubble** shows where you are, for example **3 of 12**. It is on by default.
+| Group | What is in it |
+| --- | --- |
+| **Updates** | Optional update check (off by default) and a button to check now. |
+| **Controls** | Touch on/off, hide the bar, show the hand button in the header. |
+| **Look** | **Style**, **Side**, the page bubble (what it shows, page length), page vibration. |
+| **Scrollbar look** | Bar width (automatic by default), shape, colour, opacity, **Show track**, **Track when idle**, glow. |
+| **Margins and arrows** | Top, bottom and edge margins (automatic per device), touch area, arrow buttons, arrow size, what a tap does, step size, hold speed. |
+| **Minimap only** | Fast rendering, width, margins, top offset, height. |
+| **Scrolling** | Smooth scrolling and glide length, ignore small finger movements, screen refresh rate, animate the top and bottom bars. |
+| **Performance** | Get ready at start-up, faster loading, hold back jumps, scroll diagnostics. |
+| **Other** | Hide on mobile, and files or folders to exclude. |
 
-**What you see**
+**Track when idle** (new in 6.3): *Fades away* (default) fades the faint track behind the bar out a moment after you stop scrolling and brings it back when you scroll. *Stays visible* keeps it there.
 
-- A pill pops out of the thumb while the note scrolls, follows the thumb, and sits on the same side as the bar.
-- It uses the thumb's colour, with black or white text for readability.
-- When you stop, it settles into the bar's resting colour and shrinks away. It stays up while you drag the bar or hold an arrow.
-- It does not appear when you open a note (jumping back to where you left off is not a scroll).
-- With *reduce motion* on in your system, the number changes without animation.
+Commands in the command palette: **Check for updates**, and an empty **Do nothing (pull-down action)** used by the first-run setup.
 
-**How pages are counted**
+## Good to know
 
-Pages are counted in the note's **text**, not screen heights, so rotating, unfolding or resizing never changes them.
-
-- Each line counts as its length in characters, with a minimum of 40 so blank and short lines still take space.
-- One page is **1800 characters** by default (change it with *Page length*).
-- Your page is the one holding the line at the **top of the screen**. The very end of a note is always the last page.
-- Works the same in the editor and the reading view.
-
-**Page vibration** (phone or tablet only): a short buzz each time you scroll into another page, or each time the percent changes. It works with the bubble off. The first move after a pause never buzzes, and some devices (iPhone) don't allow vibration from apps.
-
-## Settings reference
-
-Open **Settings → My Note Minimap [Scrollbar]**. The sections below follow the order on the settings page. Where a row only appears under certain conditions, that is noted. Sliders have **− and + buttons** (hold to repeat) and always show the current value; a **reset** button on a group puts its sliders back to default with a short glide. Rows that depend on a toggle fold open and shut smoothly.
-
-### Updates
-
-| Setting | What it does | Default |
-| --- | --- | --- |
-| **Check for updates automatically** | Contacts api.github.com about once a day when Obsidian starts to look for a newer release, and shows a notice if there is one. It never installs by itself. | Off |
-| **Version / Check for updates** | Shows the installed version. Tap the button to check GitHub now. While it checks, a small ring turns in the button. If a newer release exists, the button becomes **Update to X**: tap it to download and install the three release files and reload the plugin. | – |
-
-### Controls
-
-| Setting | What it does | Default |
-| --- | --- | --- |
-| **Touch controls** | Turn off to let touches pass through to the note. The bar then only shows where you are. | On |
-| **Hide scrollbar** | Hide the bar and give the note the full width. | Off |
-| **Header button** | Add the hand button to the note header (see [Touch button](#touch-button)). | On |
-
-### Look
-
-| Setting | What it does | Default / range |
-| --- | --- | --- |
-| **Style** | *Scrollbar* is a thin bar you drag. *Minimap* is a small preview of your note (can be slow on long notes). | Scrollbar |
-| **Side** | Which side of the screen the bar is on: *Right* or *Left*. | Right |
-| **Page bubble** | Show a small circle with the page number when you scroll. | On |
-| **Bubble shows** | *Page number* (3 of 12) or *Percent read*. Only shown while the bubble is on. | Page number |
-| **Page length** | How much text is one page, in characters. Smaller means more, shorter pages. Only shown while the bubble is on. | 1800 (600 to 4000) |
-| **Page vibration** | A light buzz as you scroll through the note. Phone or tablet only. Works even with the bubble off. | On |
-| **Buzz on** | What the buzz counts: *Same as the bubble*, *Each page*, or *Each percent*. Phone or tablet only. | Same as the bubble |
-
-**Scrollbar style only** (these rows fold away when *Style* is *Minimap*):
-
-| Setting | What it does | Default / range |
-| --- | --- | --- |
-| **Bar width** | How wide the bar is, in pixels. **Automatic** by default: about 14 px on a typical phone, nudged up or down with screen size. Setting your own value switches it off. | Automatic (6 to 40 px) |
-| **Shape** | How round the bar corners are: *Pill (fully round)*, *Rounded* or *Square*. | Pill |
-| **Colour** | *Auto* matches your theme. *Custom* lets you pick any colour: type a hex code, use the colour picker, or tap a quick-pick swatch. Swatches are grouped as *From your theme*, *Shades of your accent*, *Nearby hues* and *Palette*. | Auto |
-| **Opacity** | How solid the bar looks. | 0.75 (0.2 to 1) |
-| **Show track** | Show a faint line behind the bar. | On |
-| **Glow** | Add a soft glow around the bar. Turning it on reveals the four rows below. | Off |
-| **Glow colour** | *Auto* matches the bar. *Custom* lets you pick a colour, the same way as *Colour*. | Auto |
-| **Glow size** | How far the glow spreads, in pixels. | 8 (0 to 40) |
-| **Glow strength** | How thick the glow is, in pixels. | 1 (0 to 10) |
-| **Glow opacity** | How bright the glow is. | 0.8 (0.1 to 1) |
-
-### Margins and arrows
-
-Scrollbar style only.
-
-| Setting | What it does | Default / range |
-| --- | --- | --- |
-| **Margins for this device** | Shows the margins worked out for this device, so the bar clears notches, rounded corners and gesture bars. **Use device defaults** puts them back to automatic after you change them. Moving any of the three margin sliders below switches to your own values. | Automatic |
-| **Top margin** | Space above the bar, so the screen corner does not cover it. | Automatic (0 to 240 px) |
-| **Bottom margin** | Space below the bar, so the gesture bar does not cover it. | Automatic (0 to 240 px) |
-| **Edge margin** | Space between the bar and the screen edge, in pixels. | Automatic (0 to 60 px) |
-| **Touch area** | How wide the area is that reacts to your finger, in pixels. It is never narrower than the bar plus its edge gap and a little air. | 64 (20 to 140 px) |
-| **Arrow buttons** | Add up and down arrows. Tap to scroll a little (or jump to a heading), hold to keep scrolling. Turning it off hides the four rows below. | On |
-| **Arrow size** | How big each arrow button is, in pixels. This is also its tap area. | 52 (14 to 80 px) |
-| **Arrow tap does** | *Jump to heading*: a tap goes to the next or previous heading. *Scroll a step*: a tap moves the note a fixed distance. Holding always scrolls. | Jump to heading |
-| **Step per tap** | How far one tap scrolls, in pixels. Only shown when *Arrow tap does* is *Scroll a step*. | 120 (40 to 600 px) |
-| **Hold speed** | How fast the note scrolls while you hold an arrow. Higher is faster. | 200 px/s (100 to 4000) |
-
-### Minimap style only
-
-These rows fold away when *Style* is *Scrollbar*.
-
-| Setting | What it does | Default / range |
-| --- | --- | --- |
-| **Fast rendering** | The minimap's performance engine: paints the whole minimap on one canvas and only draws what is on screen, so long notes stay smooth. It looks the same as the slower path. Leave it on unless you have custom CSS that recolours individual bars. See [Performance](#performance). | On |
-| **Width** | How wide the minimap is, as a % of the note. | 12 (3 to 30) |
-| **Minimap edge margin** | Space between the minimap and the screen edge, in pixels. | Automatic (12 on a phone; 0 to 40 px) |
-| **Minimap top margin** | Space between the header and the top of the minimap, in pixels. | Automatic: measured on your device (0 to 200 px) |
-| **Minimap bottom margin** | Space between the bottom bar and the bottom of the minimap, in pixels. | Automatic: measured on your device (0 to 200 px) |
-| **Top offset** | How far down it starts, as a % of the space between the header and the bottom bar. 0 starts right under the header. | 0 (0 to 50) |
-| **Height** | How tall the minimap is, as a % of that space. 100 fills it. | 100 (20 to 100) |
-
-### Scrolling
-
-| Setting | What it does | Default / range |
-| --- | --- | --- |
-| **Smooth scrolling** | Scroll with a soft glide instead of jumping. | On |
-| **Glide length** | How long the glide lasts, in milliseconds. Longer is softer. Only shown while smooth scrolling is on. | 340 ms (80 to 800) |
-| **Ignore small movements** | While you hold the scrollbar or minimap, movement smaller than this many pixels is ignored, so a resting finger that drifts a little does not move the note. Once you move further than this from where you pressed, the drag follows you as normal. 0 turns it off. | 6 px (0 to 24) |
-| **Screen refresh rate** | Helps arrow scrolling stay smooth. Leave on *Automatic* unless it looks jumpy. See [Screen refresh rate](#screen-refresh-rate). | Automatic (or 60, 90, 120, 144 Hz) |
-| **Animate top and bottom bars** | Slide and fade the header and the bottom bar out of the way while you scroll, and bring them back when you stop. Holding an arrow hides them; Obsidian's own hide-on-scroll gets the same smooth slide. | On |
-| **Bar animation** | How the bars leave and come back: *Slide and fade*, *Slide only* or *Fade only*. Only shown while the animation is on. | Slide and fade |
-| **Bar animation speed** | How long the bars take to move, in milliseconds. Lower is quicker. Only shown while the animation is on. | 450 ms (150 to 900) |
-
-### Performance
-
-| Setting | What it does | Default |
-| --- | --- | --- |
-| **Get ready while Obsidian starts** | Does the first-time work while Obsidian is still opening, so the first scroll is smooth. Takes effect next time Obsidian starts. | On |
-| **Faster loading and smoother holding** | Opens notes faster and makes holding an arrow smoother on long or heavy notes. See [Faster loading and smoother holding](#faster-loading-and-smoother-holding). | On |
-| **Hold back jumps** | Stops sudden jumps while you hold an arrow: if the note moves more than the text did, it is put back. Turn it off if holding feels worse. | On |
-| **Scroll diagnostics** | After holding an arrow, show a short report on how smooth it was. Only for troubleshooting. See [Scroll diagnostics](#scroll-diagnostics). | Off |
-
-### Other
-
-| Setting | What it does | Default |
-| --- | --- | --- |
-| **Hide on mobile** | Turn the minimap off on phones and tablets. | Off |
-| **Exclusions** | Files or folders that should not show the bar. Type a path such as `Folder/Note.md` and tap **Add exclusion**. Each one appears as a tag you can remove. | None |
-
-## Commands
-
-Both are in the command palette.
-
-- **Check for updates:** the same as the button under *Updates*. It shows a notice with the result.
-- **Do nothing (pull-down action):** an empty command used by the [first-run setup](#first-run-setup-phone-or-tablet-only), so pulling down from the top of the screen no longer opens a menu. Its label is hidden when you pull down.
-
-## How it works
-
-### Screen refresh rate
-
-Arrow scrolling is timed to your screen. On a phone the plugin asks once for your rate (60, 90, 120 or 144 Hz) and can measure it: tap *Measure* and keep a finger moving on the box. Change it any time under *Screen refresh rate*. Leave it on *Automatic* if unsure; a value that doesn't match the screen is ignored. Every redraw while holding moves the note by a whole number of pixels, which removes faint shimmer.
-
-### Minimap colours
-
-Every colour in the minimap is read from your current theme, so it follows the note itself and changes with the theme or light/dark mode:
-
-- **Headings** use the colour of each heading level (H1 to H6). **Plain text** is your text colour, a little softer.
-- Inside a line, **bold**, *italic*, ==highlight==, `inline code`, `[[wiki links]]`, `[links](url)`, `#tags`, ~~strikethrough~~ and the bullet or number of a list each get their own colour, drawn where they sit in the line.
-- **Callouts** take the colour of their type (info, tip, warning and so on): a tinted band with a bar down its left edge, and the title line in the full colour. **Quotes** get the quote colour and bar. **Code blocks** sit on the code background. **Rules** and **front matter** use their theme colours.
-- Each line sits where it really is in the note, so the bars line up with the thumb and with what is on screen. This also needs *Fast rendering*, as does colouring each word.
-- Colouring each word needs *Fast rendering* (on by default). With it off, each line is one colour from the same palette.
-
-### Look and motion
-
-- **Minimap panel:** a rounded panel with a hairline edge. It slides in from its edge when it appears, rests a little quieter, wakes (fuller, brighter) while the note scrolls or you touch it, and settles about two seconds after things go quiet. The picture keeps a little air from the sides and fades out toward its top and bottom ends.
-- **Visible band:** a lit glass window in your accent colour. While you drag it swells slightly past the panel, gets a bright rim and a glow, and everything outside it is dimmed. Glows are limited to the gap between the panel and the screen edge so they are even on both sides, and the panel lifts a few pixels inward while you drag to make room; a larger *Minimap edge margin* gives the glow more room.
-- **Scrollbar groove:** when the scrollbar goes idle, the faint groove folds in to the thumb from both ends, wherever the thumb is, and fades out; scrolling again grows it back out. The thumb and the arrows stay. It steps aside while you drag.
-- **Hiding and showing:** long-pressing the header button slides the strip out toward its edge as it fades, and brings it back the same way. With the arrows on, they go with the bar: hiding the scrollbar hides the arrow buttons too, and showing it brings them back.
-- **How it is animated:** everything moves with one shared set of curves (arrivals slow down into place, travel glides, fades are soft) and only ever animates position, scale and opacity, the kind the phone's graphics side runs by itself, never layout or repainting. Shadows and glows are layers that fade in and out rather than shadows being tweened, the dimming around the band is slid into place, and the band's swell is a scale. All of it stops when the system's reduced-motion setting is on.
-
-### Performance
-
-The minimap is performance-driven: every part of how it is drawn and refreshed is built so that a long note, a busy theme or a phone does not make scrolling or typing feel slower. The **scrollbar** style is lighter still, because it draws no picture at all, so if you only want smooth navigation, choose it under *Style*. The rest of this section describes what the minimap does to stay fast. All of it applies with **Fast rendering**, which is on by default and has no visual cost (it is minimap only).
-
-**How it is drawn**
-
-- **One canvas instead of one element per line:** a note's lines are classified once into a compact list (heading level, quote, callout, code, list, plain text and so on, with the colour runs inside each line) and the whole minimap is painted onto a single canvas. Without Fast rendering the minimap needs a separate page element for every line (up to 3000 of them), and the browser has to lay out and track each one; with it, there is only one element, however long the note is. The canvas is sized to your screen's pixel density, so it stays sharp without being drawn any larger than it needs to be.
-- **Only what is visible is painted:** the minimap can show a note far taller than the strip it sits in, so each paint finds the first line that can reach the strip by a binary search (a halving search rather than walking the list from the top) and stops at the first line past the bottom edge. The work per paint depends on how many lines fit in the strip, not on how long the note is.
-- **It repaints only when something changed:** a paint is skipped unless the text changed, the strip's size changed, or the picture has moved, so a frame in which nothing moved costs almost nothing.
-- **Layout is measured sparingly:** the minimap needs to know where each line really sits in the note so the bars line up with the thumb. That measurement is cached and is read again only when the note's height has really moved (the editor corrects its height estimates as it draws lines while you scroll). How soon it may be read again depends on what the last read cost: eight times that, but never sooner than 33 ms (about every other frame) and never later than 200 ms. A cheap read therefore keeps up with the note almost frame by frame, and an expensive one is spaced out, because reading layout can force the page to recompute it.
-- **Very long notes are sampled:** a note is reduced to at most 3000 rows for the picture, so the size of the data the minimap keeps and walks has a ceiling, whatever the length of the note.
-- **Theme colours are read once:** the colours come from your theme by styling short-lived hidden elements the way the note styles its own, and the result is kept until the theme or light/dark mode changes, instead of asking the browser for colours on every paint.
-
-**How it stays out of your way**
-
-- **Near-instant refresh that scales with the note:** after an edit the minimap is rebuilt within a few frames, not after you stop typing. The first change schedules one rebuild and every change that arrives before it runs is picked up by that same rebuild, so a burst of keystrokes costs one rebuild, never one per keystroke. How long it waits depends on what the last rebuild cost: five times that, never less than 40 ms and never more than 0.8 s. A rebuild that costs 8 ms or less is therefore done in 40 ms; one that costs 160 ms or more waits the full 0.8 s, so a very long or heavy note stays light to type in and a normal note feels live. Only the note that was edited is re-read, not every open note.
-- **Background tabs wait:** a note that is not on screen is not rebuilt while you type in another one. It stays marked as out of date and is rebuilt when you switch back to it.
-- **Hidden means idle:** when the strip is hidden, nothing is drawn or kept up to date, and the whole strip is rebuilt only when you show it again, if the note has changed meanwhile.
-- **Motion costs the graphics side, not the page:** the panel, band and fades move by position, scale and opacity only, the kind a phone's graphics hardware runs by itself (see [Look and motion](#look-and-motion)).
-
-If the minimap still stutters on a very long or heavy note or an older phone, switch to the scrollbar under *Style*. Turning Fast rendering off is not recommended: besides the per-line elements described above, it also gives up per-word colouring and exact line placement.
-
-### Faster loading and smoother holding
-
-One setting, on by default, *Faster loading and smoother holding*. It switches itself off for the session if anything misbehaves.
-
-**Loading**
-- **Open from memory:** notes whose text is already in memory open from memory instead of being re-read from storage. Notes up to 1.5 MB too big for Obsidian's own copy get a small copy of their own, dropped on any change.
-- **Hidden reading view waits:** while you are in the editor, the reading view is not built out of sight until you switch to it.
-- **Read ahead:** when idle, linked and recent notes are read into memory, and the editor draws just below the screen so the first scroll doesn't stall.
-
-**Holding an arrow**
-- **Lighter screen:** the blur behind the header and bottom bar (if your theme has one) is off until the note stops.
-- **Draw ahead (editor):** the next stretch is drawn slightly early, so pauses from heavy blocks (maths, callouts) land when the plugin picks.
-- **Reading view:** Obsidian draws the view in slices that can take 100 ms or more on equation-heavy notes. During a hold these are held back while everything from one screen behind to three ahead is drawn, then continue when the hold ends.
-
-Also: **Get ready while Obsidian starts** (on by default, applies next launch) does first-time work behind the loading screen, with a time limit (0.9 s on a phone). It layers the header and bottom bar, loads maths and code-colouring code if needed, renders a reading view to the end, and draws below the screen in the editor. Hidden views are skipped.
-
-### Header and bottom bar animation
-
-- **Animate top and bottom bars** (on by default): they slide and/or fade away while you scroll and return when you stop. Choose *Slide and fade*, *Slide only* or *Fade only*, and the speed with *Bar animation speed* (150–900 ms).
-- The plugin's own hiding (holding an arrow, dragging the strip) and Obsidian's hide-on-scroll share one set of rules, so the bars move once, together, on one curve.
-- The soft fade at the top (floating bars) shrinks with the header. Blur returns only after the slide finishes.
-- The bars wait 0.5 s into a hold before sliding, and a slide just begun is never reversed by a small wobble.
-- The bars are placed on their own graphics layers ahead of time, so the first slide doesn't hitch.
-- **Hold back jumps** (on by default): during a hold, if the note moves more than the text above a reference line did, the move is put back.
-
-### First-run setup (phone or tablet only)
-
-After the refresh-rate pop-up, the plugin sets Obsidian's *Configure mobile Quick Action* to none, so pulling down from the top no longer opens a menu. This happens once, only from the automatic pop-up. Change it back any time under Settings → Mobile.
-
-### Scroll diagnostics
-
-An optional report after a hold. It shows late frames and whether they came from the plugin or from the note or screen, when in the hold the slowest frame happened, how often late frames repeat (time or distance), what ended each press, reading-view re-plans and render passes, jumps held back, draw-ahead attempts, and start-up time.
+- **Speed.** The minimap is drawn on one canvas, only the part you can see is painted, and it redraws only when something changed, so long notes cost no more than short ones. If a very long or heavy note still stutters on an older phone, switch to the scrollbar style. Leave **Fast rendering** on.
+- **Screen refresh rate.** Arrow scrolling is timed to your screen. On a phone the plugin asks once (60, 90, 120 or 144 Hz) and can measure it for you. *Automatic* is fine if you are unsure.
+- **Colours** come from your current theme and follow light and dark mode.
+- **First run on a phone or tablet:** after the refresh-rate pop-up the plugin turns off Obsidian's pull-down Quick Action so pulling down from the top no longer opens a menu. You can change it back under Settings → Mobile.
+- **Reduced motion:** if your system asks for less motion, the animations are skipped.
+- **Scroll diagnostics** is an optional report after holding an arrow, only for troubleshooting.
 
 ## Network use and privacy
 
-The plugin runs on your device and collects no data. Its only network requests are for updates, and only to GitHub (the repository's releases):
+The plugin runs on your device and collects no data. Its only network requests are for updates, and only to GitHub (this repository's releases):
 
-- **api.github.com** (1 request): reads the latest release's version number. Made when you tap *Check for updates* (settings or command palette), or about once a day at start-up if you turn on *Check for updates automatically*. That toggle is off by default.
+- **api.github.com** (1 request): reads the latest release's version number. Made when you tap *Check for updates*, or about once a day at start-up if you turn on *Check for updates automatically* (off by default).
 - **github.com** release downloads (1 request per file): `main.js`, `manifest.json` and `styles.css`, fetched only after you tap *Update to X*.
 
-Nothing is sent about you or your notes, and nothing else leaves your device. No analytics, no telemetry.
+Nothing is sent about you or your notes. No analytics, no telemetry.
 
 ## Version history
+
+Recent versions in short. Older notes are at the bottom.
+
+- **6.3.1:** README rewritten to be shorter and easier to read.
+- **6.3.0:** New setting **Track when idle** (fade away or stay visible). Clean-up of old animation code.
+- **6.2.1:** On phones the minimap's top and bottom margins never go below the device's own margins, so it no longer runs under the header buttons or the bottom bar.
+- **6.2.0:** The minimap band is always the same height (40 px). Less dimming while you hold the band. The bubble and track fade a little slower.
+- **6.1.0:** More accurate minimap: the thumb and your touches use each line's real place in the note. The bubble and track now fade in one continuous motion with no pause, and turn around smoothly if you scroll again mid-fade.
+- **6.0.1:** No empty rows for blank lines in the minimap. The track fade runs on the bubble's clock.
+- **6.0.0:** The minimap is drawn as an even column of bars again (as in 4.6.2), with no gaps from the note's own spacing. When the scrollbar is idle, the track fades out instead of shrinking onto the thumb.
+
+<details>
+<summary>Older versions (5.2.2 and earlier)</summary>
 
 - **5.2.2:** An efficiency pass with no change in how anything looks or behaves. Every change was checked by running the old and the new code side by side on the same input and comparing what they produce.
   - *Minimap painting:* the canvas used to be told its fill colour and transparency again for almost every bar, although nearly every bar repeats the one before. Each is now written only when it differs from what was written last (starting from nothing known at the beginning of every paint, so the first write always happens). The first row of a wrapped paragraph also reuses the edge fade already worked out for it, and a heading's colour is looked up from a fixed list instead of a text key being built for every heading. Checked on 4,000 random notes (over 1.2 million drawn bars): every bar came out with the same position, size, transparency and colour, and the canvas received about a third fewer state changes.
@@ -335,3 +138,5 @@ Nothing is sent about you or your notes, and nothing else leaves your device. No
 ## License
 
 [MIT](LICENSE)
+
+</details>
