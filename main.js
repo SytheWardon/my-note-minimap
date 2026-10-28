@@ -20,7 +20,7 @@ const UPDATE_EVERY_MS = 24 * 60 * 60 * 1000; // the automatic check runs at most
 // The version of this code. It travels inside main.js, so it is always the version that is actually running (Obsidian
 // only reads manifest.json at start-up, and reading it from disk ourselves caused a hitch). Keep it equal to the
 // version in manifest.json; the release workflow refuses to publish if they differ.
-const PLUGIN_VERSION = '6.3.1';
+const PLUGIN_VERSION = '6.3.2';
 
 // 1 if version a is newer than b, -1 if older, 0 if the same ("1.2.3" style, a leading "v" is ignored).
 function cmpVer(a, b) {
@@ -55,6 +55,7 @@ const DEFAULTS = {
 	touchEnabled: true, // false = the strip ignores touches (they reach the note)
 	touchButton: true, // show an on/off button in the note header
 	hideScrollbar: false, // long-press the header button to hide / show the whole strip
+	hideNativeScrollbar: true, // hide Obsidian's own scrollbar in notes (the old hide-scrollbar.css snippet, now built in)
 	showArrows: true,
 	arrowSize: 52, // px height of each arrow button (also its touch zone)
 	stepSize: 120, // px scrolled per arrow tap
@@ -459,7 +460,39 @@ function lockStyle(el, styles) {
 	for (const k in styles) el.style.setProperty(k, styles[k], 'important');
 }
 
+// Obsidian's own scrollbar in notes (editing, preview and reading views). This is the old hide-scrollbar.css snippet; the
+// plugin now injects it itself at start-up, so the snippet file is no longer needed.
+const NATIVE_SCROLLBAR_STYLE_ID = 'my-note-minimap-hide-native-scrollbar';
+const NATIVE_SCROLLBAR_CSS = `
+.markdown-source-view .cm-scroller,
+.markdown-preview-view,
+.markdown-reading-view {
+	scrollbar-width: none;
+}
+.markdown-source-view .cm-scroller::-webkit-scrollbar,
+.markdown-preview-view::-webkit-scrollbar,
+.markdown-reading-view::-webkit-scrollbar {
+	display: none;
+}
+`;
+
 class NoteMinimapPlugin extends Plugin {
+	// Adds or removes the style tag that hides Obsidian's native scrollbar, following the setting.
+	applyNativeScrollbar() {
+		const on = !this._unloaded && this.settings.hideNativeScrollbar !== false;
+		let el = document.getElementById(NATIVE_SCROLLBAR_STYLE_ID);
+		if (!on) {
+			if (el) el.remove();
+			return;
+		}
+		if (!el) {
+			el = document.createElement('style');
+			el.id = NATIVE_SCROLLBAR_STYLE_ID;
+			document.head.appendChild(el);
+		}
+		if (el.textContent !== NATIVE_SCROLLBAR_CSS) el.textContent = NATIVE_SCROLLBAR_CSS;
+	}
+
 	async onload() {
 		const saved = (await this.loadData()) || {};
 		this.settings = Object.assign({}, DEFAULTS, saved);
@@ -514,6 +547,7 @@ class NoteMinimapPlugin extends Plugin {
 		this.settings.ver = 13;
 		this.states = new Map();
 		this._unloaded = false;
+		this.applyNativeScrollbar();
 		this._refreshQueued = false;
 		this.saveDirty = false;
 		this.saveSoon = debounce(() => this.flushSave(), 400, true);
@@ -915,6 +949,8 @@ class NoteMinimapPlugin extends Plugin {
 	}
 
 	onunload() {
+		this._unloaded = true;
+		this.applyNativeScrollbar();
 		this.removeStartHook();
 		for (const st of this.states.values()) this.ungateRender(st, true);
 		this.untimePlans();
@@ -4948,6 +4984,17 @@ class MinimapSettingTab extends PluginSettingTab {
 			.addToggle((t) =>
 				t.setValue(p.settings.touchEnabled).onChange(async (v) => {
 					p.settings.touchEnabled = v;
+					await p.saveSettings();
+				})
+			);
+
+		new Setting(containerEl)
+			.setName('Hide Obsidian scrollbar')
+			.setDesc("Hide Obsidian's own scrollbar in notes. Applied every time the plugin starts.")
+			.addToggle((t) =>
+				t.setValue(p.settings.hideNativeScrollbar !== false).onChange(async (v) => {
+					p.settings.hideNativeScrollbar = v;
+					p.applyNativeScrollbar();
 					await p.saveSettings();
 				})
 			);

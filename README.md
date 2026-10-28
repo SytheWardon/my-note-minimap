@@ -12,6 +12,7 @@ An [Obsidian](https://obsidian.md) plugin that adds a scrollbar or a colour-code
 - **Easy to restyle:** bar colour, width, shape, opacity, glow, and which side it sits on. The bar width adapts to your screen by default.
 - **Smooth motion:** the bubble and the bar's track fade in and out together, and the top and bottom bars can slide away while you scroll.
 - **Fits your device:** margins scale with your screen, so nothing sits under notches, the header buttons or the bottom bar.
+- **Hides Obsidian's own scrollbar** (new in 6.3.2): so you see one scrollbar, not two. No CSS snippet needed.
 
 ## Install
 
@@ -35,7 +36,7 @@ Open **Settings → My Note Minimap [Scrollbar]**. Every slider has − and + bu
 | Group | What is in it |
 | --- | --- |
 | **Updates** | Optional update check (off by default) and a button to check now. |
-| **Controls** | Touch on/off, hide the bar, show the hand button in the header. |
+| **Controls** | Touch on/off, **Hide Obsidian scrollbar**, hide the bar, show the hand button in the header. |
 | **Look** | **Style**, **Side**, the page bubble (what it shows, page length), page vibration. |
 | **Scrollbar look** | Bar width (automatic by default), shape, colour, opacity, **Show track**, **Track when idle**, glow. |
 | **Margins and arrows** | Top, bottom and edge margins (automatic per device), touch area, arrow buttons, arrow size, what a tap does, step size, hold speed. |
@@ -45,6 +46,8 @@ Open **Settings → My Note Minimap [Scrollbar]**. Every slider has − and + bu
 | **Other** | Hide on mobile, and files or folders to exclude. |
 
 **Track when idle** (new in 6.3): *Fades away* (default) fades the faint track behind the bar out a moment after you stop scrolling and brings it back when you scroll. *Stays visible* keeps it there.
+
+**Hide Obsidian scrollbar** (new in 6.3.2, on by default): the plugin hides Obsidian's built-in scrollbar in the editing, preview and reading views each time it starts, so it no longer clashes with the plugin's bar. Turn it off to get the native scrollbar back straight away, and turning the plugin off also brings it back. This replaces the old `hide-scrollbar.css` snippet, so you can remove that snippet. It is separate from **Hide scrollbar**, which hides the plugin's own bar.
 
 Commands in the command palette: **Check for updates**, and an empty **Do nothing (pull-down action)** used by the first-run setup.
 
@@ -70,6 +73,7 @@ Nothing is sent about you or your notes. No analytics, no telemetry.
 
 Recent versions in short. Older notes are at the bottom.
 
+- **6.3.2:** New setting **Hide Obsidian scrollbar** (on by default). The plugin now hides Obsidian's own scrollbar at start-up and puts it back when switched off or unloaded, replacing the `hide-scrollbar.css` snippet.
 - **6.3.1:** README rewritten to be shorter and easier to read.
 - **6.3.0:** New setting **Track when idle** (fade away or stay visible). Clean-up of old animation code.
 - **6.2.1:** On phones the minimap's top and bottom margins never go below the device's own margins, so it no longer runs under the header buttons or the bottom bar.
