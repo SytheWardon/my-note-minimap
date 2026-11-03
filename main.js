@@ -3,11 +3,19 @@
 const obsidian = require('obsidian');
 const { Plugin, MarkdownView, PluginSettingTab, Setting, Platform, Notice, Modal, debounce, setIcon, requestUrl } = obsidian;
 
-// Obsidian's own setting for the pull-down Quick Action (Settings > Mobile > Configure mobile Quick Action).
-// Obsidian has no real "off": with nothing assigned, every pull-down shows an "Action not configured" prompt. So the
-// action is set to this plugin's own command, which does nothing; Obsidian counts it as configured and stays quiet.
+// Obsidian's own setting for the pull-down Quick Action (Settings > Interface > Configure mobile Quick Action; older
+// versions had it under Settings > Mobile).
+// Obsidian 1.15 has a real "off": an empty value (shown as "Disabled") and a pull-down then does nothing at all.
+// Before 1.15 there was no off: with nothing assigned, every pull-down showed an "Action not configured" prompt. So
+// there the action is set to this plugin's own command, which does nothing; Obsidian counts it as configured.
 const QUICK_ACTION_KEY = 'mobilePullAction';
-const QUICK_ACTION_OFF = 'my-note-minimap:pull-nothing';
+const QUICK_ACTION_LEGACY_OFF = 'my-note-minimap:pull-nothing';
+const REAL_OFF_SINCE = '1.15.0';
+// The value that means "off" on the Obsidian that is running.
+function quickActionOff() {
+	const v = obsidian.apiVersion;
+	return typeof v === 'string' && cmpVer(v, REAL_OFF_SINCE) >= 0 ? '' : QUICK_ACTION_LEGACY_OFF;
+}
 
 // A source line counts as at least this many characters of a page, so blank and short lines still take their place.
 const PAGE_MIN = 40;
@@ -20,7 +28,7 @@ const UPDATE_EVERY_MS = 24 * 60 * 60 * 1000; // the automatic check runs at most
 // The version of this code. It travels inside main.js, so it is always the version that is actually running (Obsidian
 // only reads manifest.json at start-up, and reading it from disk ourselves caused a hitch). Keep it equal to the
 // version in manifest.json; the release workflow refuses to publish if they differ.
-const PLUGIN_VERSION = '6.3.2';
+const PLUGIN_VERSION = '6.4.1';
 
 // 1 if version a is newer than b, -1 if older, 0 if the same ("1.2.3" style, a leading "v" is ignored).
 function cmpVer(a, b) {
@@ -1958,7 +1966,8 @@ class NoteMinimapPlugin extends Plugin {
 		try {
 			if (setting && typeof setting.open === 'function') {
 				setting.open();
-				if (typeof setting.openTabById === 'function') setting.openTabById('mobile');
+				// Obsidian 1.15 moved the Quick Action to the Interface page; older versions had a Mobile page.
+				if (typeof setting.openTabById === 'function' && !setting.openTabById('interface')) setting.openTabById('mobile');
 			}
 		} catch (e) {
 			// the settings page could not be opened; the value below is still set
@@ -1967,11 +1976,12 @@ class NoteMinimapPlugin extends Plugin {
 		await new Promise((resolve) => window.setTimeout(resolve, 450));
 		if (this._unloaded) return;
 		try {
-			if (app.vault && typeof app.vault.setConfig === 'function') app.vault.setConfig(QUICK_ACTION_KEY, QUICK_ACTION_OFF);
-			// Draw the Mobile page again so it shows the new value.
+			if (app.vault && typeof app.vault.setConfig === 'function') app.vault.setConfig(QUICK_ACTION_KEY, quickActionOff());
+			// Draw the page again so it shows the new value (1.15 pages are rebuilt by update(); older ones by display()).
 			const tab = setting && setting.activeTab;
-			if (tab && typeof tab.display === 'function') tab.display();
-			new Notice('Pull-down Quick Action set to do nothing.');
+			if (tab && typeof tab.update === 'function' && typeof tab.getSettingDefinitions === 'function') tab.update();
+			else if (tab && typeof tab.display === 'function') tab.display();
+			new Notice('Pull-down Quick Action turned off.');
 		} catch (e) {
 			// leave it as it was
 		}
@@ -2016,6 +2026,12 @@ class NoteMinimapPlugin extends Plugin {
 		});
 		let timer = null;
 		const watch = () => {
+			// Obsidian 1.15+ with the Quick Action really off shows no label and no prompt: nothing to hide, nothing to watch.
+			try {
+				if (quickActionOff() === '' && !this.app.vault.getConfig(QUICK_ACTION_KEY)) return;
+			} catch (e) {
+				/* watch as before */
+			}
 			if (timer) clearTimeout(timer);
 			timer = null;
 			if (!this._pullWatching) {
@@ -2047,8 +2063,8 @@ class NoteMinimapPlugin extends Plugin {
 		if (!Platform.isMobile || this._unloaded || !this.settings.refreshAsked) return;
 		try {
 			const v = this.app.vault;
-			if (v && typeof v.getConfig === 'function' && typeof v.setConfig === 'function' && v.getConfig(QUICK_ACTION_KEY) !== QUICK_ACTION_OFF) {
-				v.setConfig(QUICK_ACTION_KEY, QUICK_ACTION_OFF);
+			if (v && typeof v.getConfig === 'function' && typeof v.setConfig === 'function' && v.getConfig(QUICK_ACTION_KEY) !== quickActionOff()) {
+				v.setConfig(QUICK_ACTION_KEY, quickActionOff());
 			}
 		} catch (e) {
 			// leave it as it was

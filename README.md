@@ -49,14 +49,14 @@ Open **Settings → My Note Minimap [Scrollbar]**. Every slider has − and + bu
 
 **Hide Obsidian scrollbar** (new in 6.3.2, on by default): the plugin hides Obsidian's built-in scrollbar in the editing, preview and reading views each time it starts, so it no longer clashes with the plugin's bar. Turn it off to get the native scrollbar back straight away, and turning the plugin off also brings it back. This replaces the old `hide-scrollbar.css` snippet, so you can remove that snippet. It is separate from **Hide scrollbar**, which hides the plugin's own bar.
 
-Commands in the command palette: **Check for updates**, and an empty **Do nothing (pull-down action)** used by the first-run setup.
+Commands in the command palette: **Check for updates**, and an empty **Do nothing (pull-down action)** used by the first-run setup on Obsidian versions before 1.15.
 
 ## Good to know
 
 - **Speed.** The minimap is drawn on one canvas, only the part you can see is painted, and it redraws only when something changed, so long notes cost no more than short ones. If a very long or heavy note still stutters on an older phone, switch to the scrollbar style. Leave **Fast rendering** on.
 - **Screen refresh rate.** Arrow scrolling is timed to your screen. On a phone the plugin asks once (60, 90, 120 or 144 Hz) and can measure it for you. *Automatic* is fine if you are unsure.
 - **Colours** come from your current theme and follow light and dark mode.
-- **First run on a phone or tablet:** after the refresh-rate pop-up the plugin turns off Obsidian's pull-down Quick Action so pulling down from the top no longer opens a menu. You can change it back under Settings → Mobile.
+- **First run on a phone or tablet:** after the refresh-rate pop-up the plugin turns off Obsidian's pull-down Quick Action so pulling down from the top no longer opens a menu. On Obsidian 1.15 and newer this is the real *Disabled* setting; on older versions it is set to the plugin's empty command. You can change it back under Settings → Interface (older versions: Settings → Mobile).
 - **Reduced motion:** if your system asks for less motion, the animations are skipped.
 - **Scroll diagnostics** is an optional report after holding an arrow, only for troubleshooting.
 
@@ -73,6 +73,8 @@ Nothing is sent about you or your notes. No analytics, no telemetry.
 
 Recent versions in short. Older notes are at the bottom.
 
+- **6.4.1:** Version bump only; no change in behaviour.
+- **6.4.0:** Checked against Obsidian 1.15.0. The pull-down Quick Action is now turned off with Obsidian's own *Disabled* value (an empty one), so no label or prompt appears and the plugin no longer watches the screen on each touch for one; versions before 1.15 keep the empty-command method. The first-run setup now opens Settings → Interface, where Obsidian 1.15 moved this setting (older versions: Mobile), and redraws it after the change. A Quick Action left on the old empty command is switched to *Disabled* on 1.15+.
 - **6.3.2:** New setting **Hide Obsidian scrollbar** (on by default). The plugin now hides Obsidian's own scrollbar at start-up and puts it back when switched off or unloaded, replacing the `hide-scrollbar.css` snippet.
 - **6.3.1:** README rewritten to be shorter and easier to read.
 - **6.3.0:** New setting **Track when idle** (fade away or stay visible). Clean-up of old animation code.
