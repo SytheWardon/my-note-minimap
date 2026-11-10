@@ -28,7 +28,7 @@ const UPDATE_EVERY_MS = 24 * 60 * 60 * 1000; // the automatic check runs at most
 // The version of this code. It travels inside main.js, so it is always the version that is actually running (Obsidian
 // only reads manifest.json at start-up, and reading it from disk ourselves caused a hitch). Keep it equal to the
 // version in manifest.json; the release workflow refuses to publish if they differ.
-const PLUGIN_VERSION = '6.4.1';
+const PLUGIN_VERSION = '6.4.3';
 
 // 1 if version a is newer than b, -1 if older, 0 if the same ("1.2.3" style, a leading "v" is ignored).
 function cmpVer(a, b) {
@@ -97,6 +97,12 @@ const DEFAULTS = {
 	fastRender: true, // faster minimap: painted on one canvas, and rebuilt almost at once after an edit (the wait grows with what a rebuild costs, so heavy notes stay light)
 	dragSlop: 6, // px: while a finger or pointer is held on the strip, movement smaller than this is ignored (0 = off)
 	exclusions: [],
+	// EXPERIMENTAL: Full Screen Guard (see FullScreenGuard). Off unless switched on under Settings > Experimental.
+	fsgEnabled: false,
+	fsgForce: true, // keep the status bar hidden
+	fsgKeepAuto: true, // keep Obsidian's own "Auto full screen" setting on
+	fsgCameraEdge: 'device-top', // device-top | top | left | right
+	fsgPadding: 0, // least space (px) kept clear on the camera's edge; 0 = only what Android reports
 };
 
 // The minimap's own edge gap when you have not set one: about where the header's buttons end on a phone, so the
@@ -484,6 +490,408 @@ const NATIVE_SCROLLBAR_CSS = `
 }
 `;
 
+// ---------------------------------------------------------------------------------------------------------------
+// Full Screen Guard (EXPERIMENTAL, off by default; merged in from the separate Full Screen Guard plugin)
+//
+// Two jobs, both for the phone app, and both only while Settings > Experimental > Full Screen Guard is on:
+//   1. Keep the Android status bar hidden. Obsidian's own "Auto full screen" hides it while you scroll down and shows
+//      it again when you scroll up or close the keyboard; this stops it coming back.
+//   2. Keep the note and Obsidian's bars clear of the camera cutout. Obsidian positions everything with the CSS
+//      variables --safe-area-inset-top/right/bottom/left (from what Android reports). With the status bar hidden
+//      Android can report 0 although the screen still reaches under the camera, so this keeps a minimum amount of
+//      space clear on the camera's edge.
+//
+// How it reaches the status bar (checked against Obsidian 1.15.0's app.js): Obsidian holds the status bar as a
+// Capacitor plugin and calls StatusBar.hide() / StatusBar.show({animation}) on it. Capacitor sends every such call
+// through window.Capacitor.nativePromise(pluginName, methodName, options), looked up at call time. So this
+//   - calls nativePromise('StatusBar', 'hide') itself, and
+//   - wraps nativePromise so that Obsidian's StatusBar.show() is ignored while full screen is forced.
+// Every step is guarded: if a piece is missing in some version, that step is skipped and nothing else is affected.
+//
+// While the feature is off nothing here runs: no wrapper, no listeners, no timers, no probe element. Switching it off
+// (or unloading the plugin) undoes everything: the wrapper comes off, the space variables are removed and the status
+// bar is shown again.
+// ---------------------------------------------------------------------------------------------------------------
+const FSG_EDGE_VARS = {
+	top: '--safe-area-inset-top',
+	right: '--safe-area-inset-right',
+	bottom: '--safe-area-inset-bottom',
+	left: '--safe-area-inset-left',
+};
+const FSG_EDGES = ['top', 'right', 'bottom', 'left'];
+const FSG_CAMERA_EDGES = ['device-top', 'top', 'left', 'right'];
+
+function fsgCapacitor() {
+	const cap = window.Capacitor;
+	return cap && typeof cap.nativePromise === 'function' ? cap : null;
+}
+
+class FullScreenGuard {
+	constructor(plugin) {
+		this.plugin = plugin;
+		this.app = plugin.app;
+		this.isReady = false; // the workspace is up (nothing starts before that)
+		this.running = false;
+		this.sig = ''; // the settings the running guard last applied
+		this._timers = new Set();
+		this._offs = []; // one function per listener, each takes its listener off again
+		this._observer = null;
+		this._origNative = null;
+		this._wrappedNative = null;
+		this._applied = ''; // "side:value" while a space override is on the page
+		this._reserved = null; // { side, value } of that override, read by the minimap's own measuring
+		this._selfResize = false;
+		this._wasHiddenNav = false;
+		this._probe = null;
+		this._soonT = null;
+		this._soonFrom = 0;
+	}
+
+	get s() {
+		return this.plugin.settings;
+	}
+
+	signature() {
+		const s = this.s;
+		return [s.fsgForce, s.fsgKeepAuto, s.fsgCameraEdge, s.fsgPadding].join('|');
+	}
+
+	// On only when it was switched on, on the phone app, once the workspace is up, and while the plugin is loaded.
+	wanted() {
+		return !this.plugin._unloaded && this.isReady && Platform.isMobileApp && this.s.fsgEnabled === true;
+	}
+
+	ready() {
+		this.isReady = true;
+		this.sync();
+	}
+
+	// Brings the guard in line with the settings: starts it, stops it, or applies a changed value. Cheap when nothing
+	// that matters changed, so it is safe to call after every settings save.
+	sync() {
+		if (!this.wanted()) {
+			if (this.running) this.stop();
+			return;
+		}
+		if (!this.running) {
+			this.start();
+			return;
+		}
+		const sig = this.signature();
+		if (sig === this.sig) return;
+		this.sig = sig;
+		this.refresh();
+	}
+
+	// Used after a settings save. Switching the guard on or off happens at once. A changed value (the slider, the plus and
+	// minus buttons) is applied once the finger pauses, never on every step: applying means reading the phone's insets,
+	// rewriting the page's space variables and laying everything out again, and doing that on every step of a drag or a
+	// held button is what made those controls stutter. At most 0.9 s passes before a long drag is applied too.
+	syncSoon() {
+		const want = this.wanted();
+		if (want !== this.running) {
+			this.cancelSoon();
+			this.sync();
+			return;
+		}
+		if (!want || this.signature() === this.sig) return;
+		const now = performance.now();
+		if (this._soonT) {
+			clearTimeout(this._soonT);
+		} else {
+			this._soonFrom = now;
+		}
+		const wait = Math.max(0, Math.min(250, 900 - (now - this._soonFrom)));
+		this._soonT = setTimeout(() => {
+			this._soonT = null;
+			this.sync();
+		}, wait);
+	}
+
+	cancelSoon() {
+		if (this._soonT) clearTimeout(this._soonT);
+		this._soonT = null;
+	}
+
+	// ----- start / stop ----------------------------------------------------------------------------------------
+
+	listen(target, type, fn) {
+		if (!target || typeof target.addEventListener !== 'function') return;
+		target.addEventListener(type, fn);
+		this._offs.push(() => target.removeEventListener(type, fn));
+	}
+
+	watch(owner, ref) {
+		this._offs.push(() => owner.offref(ref));
+	}
+
+	start() {
+		if (this.running) return;
+		this.running = true;
+		this.sig = this.signature();
+		this.installShowBlocker();
+
+		// Obsidian shows the status bar again when the bars come back (the is-hidden-nav class is removed) and when the
+		// keyboard closes. The blocker above ignores those calls; this is the second line of defence.
+		this._wasHiddenNav = document.body.classList.contains('is-hidden-nav');
+		this._observer = new MutationObserver(() => {
+			const now = document.body.classList.contains('is-hidden-nav');
+			if (this._wasHiddenNav && !now) this.scheduleHide([60, 400]);
+			this._wasHiddenNav = now;
+		});
+		this._observer.observe(document.body, { attributes: true, attributeFilter: ['class'] });
+
+		const settle = () => {
+			this.scheduleHide([0, 250, 900]);
+			this.scheduleApply([0, 150, 500, 1200]);
+		};
+		this.listen(window, 'resize', () => {
+			if (this._selfResize) return;
+			this.scheduleApply([0, 200]);
+		});
+		this.listen(window, 'orientationchange', settle);
+		this.listen(window, 'focus', settle);
+		this.listen(window, 'keyboardWillHide', () => this.scheduleHide([60, 400]));
+		this.listen(window, 'keyboardDidHide', () => this.scheduleHide([0, 300]));
+		this.listen(document, 'visibilitychange', () => {
+			if (document.visibilityState === 'visible') settle();
+		});
+		if (window.screen && window.screen.orientation) this.listen(window.screen.orientation, 'change', settle);
+
+		this.watch(this.app.workspace, this.app.workspace.on('layout-change', () => this.scheduleApply([0])));
+		this.watch(this.app.workspace, this.app.workspace.on('css-change', () => this.scheduleApply([0])));
+		// Obsidian's own event for a changed app setting.
+		this.watch(
+			this.app.vault,
+			this.app.vault.on('config-changed', (key) => {
+				if (key === 'autoFullScreen') this.later(() => this.enforceAutoFullScreen(), 0);
+			})
+		);
+
+		this.refresh();
+		settle();
+	}
+
+	stop() {
+		if (!this.running) return;
+		this.cancelSoon();
+		this.running = false; // from here on shouldHideStatusBar() is false, so a wrapper still in the chain lets everything through
+		for (const t of this._timers) clearTimeout(t);
+		this._timers.clear();
+		if (this._observer) {
+			this._observer.disconnect();
+			this._observer = null;
+		}
+		for (const off of this._offs.splice(0)) {
+			try {
+				off();
+			} catch (e) {
+				/* already gone */
+			}
+		}
+		this.removeProbe();
+		const had = this._applied;
+		this.clearOverrides();
+		if (had) this.nudgeLayout();
+		this.removeShowBlocker();
+		this.restoreStatusBar();
+		if (!this.plugin._unloaded) this.plugin.guardInsetsChanged();
+	}
+
+	refresh() {
+		if (!this.running) return;
+		this.enforceAutoFullScreen();
+		if (this.shouldHideStatusBar()) this.scheduleHide([0, 250, 900]);
+		else this.restoreStatusBar();
+		this.scheduleApply([0, 150, 500]);
+	}
+
+	later(fn, ms) {
+		const t = setTimeout(() => {
+			this._timers.delete(t);
+			if (this.running) fn();
+		}, ms);
+		this._timers.add(t);
+	}
+
+	// ----- status bar ------------------------------------------------------------------------------------------
+
+	shouldHideStatusBar() {
+		return this.running && !!this.s.fsgForce;
+	}
+
+	installShowBlocker() {
+		const cap = fsgCapacitor();
+		if (!cap || this._origNative) return; // _origNative still set: our wrapper is still in the chain (see removeShowBlocker)
+		const orig = cap.nativePromise;
+		const self = this;
+		const wrapped = function (plugin, method) {
+			if (plugin === 'StatusBar' && method === 'show' && self.shouldHideStatusBar()) return Promise.resolve();
+			return orig.apply(this, arguments);
+		};
+		this._origNative = orig;
+		this._wrappedNative = wrapped;
+		cap.nativePromise = wrapped;
+	}
+
+	// Takes our wrapper off only if nobody wrapped it again after us. If someone did, it stays in their chain and just
+	// passes everything through (shouldHideStatusBar() is false once stopped), and a later start reuses it.
+	removeShowBlocker() {
+		const cap = fsgCapacitor();
+		if (cap && this._wrappedNative && cap.nativePromise === this._wrappedNative) {
+			cap.nativePromise = this._origNative;
+			this._origNative = null;
+			this._wrappedNative = null;
+		}
+	}
+
+	callNative(method, options) {
+		const cap = fsgCapacitor();
+		if (!cap) return;
+		const call = this._origNative || cap.nativePromise;
+		try {
+			Promise.resolve(call.call(cap, 'StatusBar', method, options || {})).catch(() => {});
+		} catch (e) {
+			/* the status bar plugin is not available: nothing to do */
+		}
+	}
+
+	hideStatusBar() {
+		if (this.shouldHideStatusBar()) this.callNative('hide');
+	}
+
+	restoreStatusBar() {
+		// Bring the status bar back, unless Obsidian's own bars are hidden right now (then it should stay hidden too).
+		if (!document.body.classList.contains('is-hidden-nav')) this.callNative('show', { animation: 'FADE' });
+	}
+
+	scheduleHide(delays) {
+		for (const ms of delays) this.later(() => this.hideStatusBar(), ms);
+	}
+
+	enforceAutoFullScreen() {
+		if (!this.s.fsgKeepAuto || !Platform.isPhone) return;
+		const v = this.app.vault;
+		try {
+			if (v && typeof v.getConfig === 'function' && typeof v.setConfig === 'function' && v.getConfig('autoFullScreen') !== true) {
+				v.setConfig('autoFullScreen', true);
+			}
+		} catch (e) {
+			/* leave Obsidian's setting as it is */
+		}
+	}
+
+	// ----- camera cutout ---------------------------------------------------------------------------------------
+
+	// A zero-size element whose padding is env(safe-area-inset-*): reading its computed padding gives what Android
+	// reports right now, in pixels. It reads env() directly, so it is not affected by the variables set below.
+	ensureProbe() {
+		if (this._probe && this._probe.isConnected) return this._probe;
+		const el = document.body.createDiv({ cls: 'full-screen-guard-probe' });
+		el.style.cssText =
+			'position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;pointer-events:none;box-sizing:content-box;' +
+			'padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);';
+		this._probe = el;
+		return el;
+	}
+
+	removeProbe() {
+		if (this._probe) this._probe.remove();
+		this._probe = null;
+	}
+
+	// What Android reports for each edge, in px.
+	measure() {
+		const cs = getComputedStyle(this.ensureProbe());
+		const num = (v) => {
+			const n = parseFloat(v);
+			return Number.isFinite(n) ? n : 0;
+		};
+		return { top: num(cs.paddingTop), right: num(cs.paddingRight), bottom: num(cs.paddingBottom), left: num(cs.paddingLeft) };
+	}
+
+	// The screen edge the camera is on right now.
+	cameraSide() {
+		const mode = this.s.fsgCameraEdge;
+		if (mode === 'top' || mode === 'left' || mode === 'right') return mode;
+		// The camera is at the top of the phone, so its screen edge changes when the phone is turned. angle 0 = upright,
+		// 90 = turned so the top of the phone points left, 180 = upside down, 270 = the top points right.
+		let angle = window.screen && window.screen.orientation && typeof window.screen.orientation.angle === 'number' ? window.screen.orientation.angle : window.orientation || 0;
+		angle = ((Math.round(angle) % 360) + 360) % 360;
+		return { 0: 'top', 90: 'left', 180: 'bottom', 270: 'right' }[angle] || 'top';
+	}
+
+	clearOverrides() {
+		for (const edge of FSG_EDGES) document.body.style.removeProperty(FSG_EDGE_VARS[edge]);
+		this._applied = '';
+		this._reserved = null;
+	}
+
+	// The space this guard is holding clear right now ({ side, value }), or null. The minimap reads it so its own
+	// margins follow the camera space, which it cannot see through env().
+	reserved() {
+		return this.running ? this._reserved : null;
+	}
+
+	scheduleApply(delays) {
+		for (const ms of delays) this.later(() => this.applyInsets(), ms);
+	}
+
+	// Sets the safe-area variable of the camera's edge to max(what Android reports, the minimum space asked for).
+	// Plain pixel numbers are used on purpose: Obsidian reads these variables with parseFloat, which cannot read a
+	// max() expression. Other edges, and everything when the minimum is 0, are left exactly as Obsidian sets them.
+	applyInsets() {
+		if (!this.running) return;
+		const pad = Math.max(0, Number(this.s.fsgPadding) || 0);
+		if (pad <= 0) {
+			if (this._applied) {
+				this.clearOverrides();
+				this.nudgeLayout();
+				this.plugin.guardInsetsChanged();
+			}
+			return;
+		}
+		const reported = this.measure();
+		const side = this.cameraSide();
+		const value = Math.round(Math.max(reported[side], pad) * 100) / 100;
+		const key = side + ':' + value;
+		if (key === this._applied) return;
+		for (const edge of FSG_EDGES) {
+			if (edge === side) document.body.style.setProperty(FSG_EDGE_VARS[edge], value + 'px');
+			else document.body.style.removeProperty(FSG_EDGE_VARS[edge]);
+		}
+		this._applied = key;
+		this._reserved = { side, value };
+		this.nudgeLayout();
+		this.plugin.guardInsetsChanged();
+	}
+
+	// Let Obsidian (and other plugins) re-measure after the variables changed.
+	nudgeLayout() {
+		this._selfResize = true;
+		try {
+			window.dispatchEvent(new Event('resize'));
+		} finally {
+			this._selfResize = false;
+		}
+	}
+
+	// The line shown under the settings: what Android reports, which edge, and the space in use.
+	describe() {
+		if (!Platform.isMobileApp) return 'Not available on desktop.';
+		const r = this.measure();
+		if (!this.running) this.removeProbe(); // measured only for this line; nothing stays on the page while the guard is off
+		const side = this.cameraSide();
+		const pad = Math.max(0, Number(this.s.fsgPadding) || 0);
+		const used = pad > 0 ? Math.max(r[side], pad) : r[side];
+		const fmt = (n) => Math.round(n * 10) / 10 + ' px';
+		return (
+			'Top ' + fmt(r.top) + ', right ' + fmt(r.right) + ', bottom ' + fmt(r.bottom) + ', left ' + fmt(r.left) +
+			'. Camera edge now: ' + side + '. Space used on that edge: ' + fmt(used) + '.'
+		);
+	}
+}
+
 class NoteMinimapPlugin extends Plugin {
 	// Adds or removes the style tag that hides Obsidian's native scrollbar, following the setting.
 	applyNativeScrollbar() {
@@ -552,6 +960,12 @@ class NoteMinimapPlugin extends Plugin {
 			if (saved.top === 5) this.settings.top = DEFAULTS.top;
 			if (saved.height === 60) this.settings.height = DEFAULTS.height;
 		}
+		// Full Screen Guard (experimental): off unless it was switched on, and every value kept inside its range.
+		this.settings.fsgEnabled = this.settings.fsgEnabled === true;
+		this.settings.fsgForce = this.settings.fsgForce !== false;
+		this.settings.fsgKeepAuto = this.settings.fsgKeepAuto !== false;
+		if (!FSG_CAMERA_EDGES.includes(this.settings.fsgCameraEdge)) this.settings.fsgCameraEdge = DEFAULTS.fsgCameraEdge;
+		this.settings.fsgPadding = Math.min(120, Math.max(0, Math.round(Number(this.settings.fsgPadding) || 0)));
 		this.settings.ver = 13;
 		this.states = new Map();
 		this._unloaded = false;
@@ -564,6 +978,23 @@ class NoteMinimapPlugin extends Plugin {
 		this.buttons = new Map(); // view -> header button
 
 		this.addSettingTab(new MinimapSettingTab(this.app, this));
+
+		// Full Screen Guard (experimental, off by default): does nothing at all until it is switched on in the settings.
+		this.guard = new FullScreenGuard(this);
+		this.app.workspace.onLayoutReady(() => this.guard.ready());
+		this.addCommand({
+			id: 'toggle-forced-full-screen',
+			name: 'Toggle forced full screen (experimental)',
+			callback: async () => {
+				if (this.settings.fsgEnabled !== true) {
+					new Notice('Full Screen Guard is off. Turn it on under Settings > My Note Minimap > Experimental first.');
+					return;
+				}
+				this.settings.fsgForce = !this.settings.fsgForce;
+				await this.saveSettings();
+				new Notice(this.settings.fsgForce ? 'Full screen is forced on.' : 'Full screen is no longer forced.');
+			},
+		});
 
 		// Several workspace events usually fire together for one action (opening a note, switching
 		// pane). Run one refresh after they have all fired instead of one per event.
@@ -752,6 +1183,17 @@ class NoteMinimapPlugin extends Plugin {
 	// room for the floating header above and the bottom bar below. Phones with notches or
 	// rounded corners get at least their safe-area insets on top of that.
 
+	// Called by the Full Screen Guard when the space it holds clear changed: measure the margins again, as after a rotation.
+	guardInsetsChanged() {
+		this._safe = null;
+		this._mmAuto = null;
+		if (this._guardT) return;
+		this._guardT = window.setTimeout(() => {
+			this._guardT = null;
+			if (!this._unloaded) this.refreshAll();
+		}, 120);
+	}
+
 	readSafeInsets() {
 		const out = { top: 0, bottom: 0, left: 0, right: 0 };
 		try {
@@ -764,6 +1206,9 @@ class NoteMinimapPlugin extends Plugin {
 			out.bottom = parseFloat(cs.paddingBottom) || 0;
 			out.left = parseFloat(cs.paddingLeft) || 0;
 			el.remove();
+			// Full Screen Guard (experimental) holds extra space clear on the camera's edge; env() cannot see it, so add it here.
+			const held = this.guard && this.guard.reserved();
+			if (held && held.side in out) out[held.side] = Math.max(out[held.side], held.value);
 		} catch (e) {
 			/* keep zeros */
 		}
@@ -958,6 +1403,9 @@ class NoteMinimapPlugin extends Plugin {
 
 	onunload() {
 		this._unloaded = true;
+		if (this._guardT) clearTimeout(this._guardT);
+		this._guardT = null;
+		if (this.guard) this.guard.stop();
 		this.applyNativeScrollbar();
 		this.removeStartHook();
 		for (const st of this.states.values()) this.ungateRender(st, true);
@@ -2072,6 +2520,7 @@ class NoteMinimapPlugin extends Plugin {
 	}
 
 	async saveSettings() {
+		if (this.guard) this.guard.syncSoon(); // Full Screen Guard: start or stop at once, apply a changed value after a pause (nothing while it is off)
 		if (this.settings.animateBars && this._barsCls) this.applyBarsLook(); // speed / style of the bars' slide (also after a reset)
 		this.queueFrameRefresh();
 		this.saveDirty = true;
@@ -5499,6 +5948,104 @@ class MinimapSettingTab extends PluginSettingTab {
 			);
 
 		this.renderExclusions(containerEl);
+
+		// ---- Experimental ----
+		// Everything here is off by default. The Full Screen Guard rows sit in a fold, so they open and close with the
+		// same motion as the other groups, and the slider is the same one used everywhere else (minus and plus buttons,
+		// a number that always shows the value, a glide, and a reset button).
+		host = containerEl;
+		new Setting(containerEl).setName('Experimental').setHeading();
+		containerEl.createEl('p', {
+			cls: 'setting-item-description',
+			text: 'Experimental features are new and may misbehave or change. Each one is off by default.',
+		});
+
+		const guardOn = p.settings.fsgEnabled === true;
+		new Setting(containerEl)
+			.setName('Full Screen Guard (experimental)')
+			.setDesc("Experimental. Off by default. Phone app only. Keeps Android's status bar hidden and keeps notes and Obsidian's bars clear of the camera cutout. Turning it off puts everything back the way Obsidian does it.")
+			.addToggle((t) =>
+				t.setValue(guardOn).onChange(async (v) => {
+					p.settings.fsgEnabled = v;
+					this.setFold(guardFold.wrap, v);
+					await p.saveSettings();
+					guardReadout(true);
+				})
+			);
+
+		const guardFold = fold(guardOn);
+		let readoutRow = null;
+		// The line under the settings reads the phone's insets (a forced layout), so while a slider moves it is redrawn
+		// once after the last step, not on every one. Refresh and the other controls redraw it at once.
+		let readoutT = 0;
+		const guardReadoutNow = () => {
+			window.clearTimeout(readoutT);
+			readoutT = 0;
+			if (readoutRow && readoutRow.settingEl.isConnected && p.guard) readoutRow.setDesc(p.guard.describe());
+		};
+		const guardReadout = (soon) => {
+			if (!soon) return guardReadoutNow();
+			window.clearTimeout(readoutT);
+			readoutT = window.setTimeout(guardReadoutNow, 300);
+		};
+		{
+			if (!Platform.isMobileApp) {
+				guardFold.inner.createEl('p', {
+					cls: 'setting-item-description',
+					text: 'Full Screen Guard only works in the Obsidian phone app. Nothing here does anything on desktop.',
+				});
+			}
+
+			new Setting(guardFold.inner)
+				.setName('Force full screen')
+				.setDesc('Keeps the Android status bar hidden. Obsidian normally shows it again when you scroll up or close the keyboard; this stops that. The bottom navigation bar of Android cannot be hidden by a plugin.')
+				.addToggle((t) =>
+					t.setValue(p.settings.fsgForce !== false).onChange(async (v) => {
+						p.settings.fsgForce = v;
+						await p.saveSettings();
+					})
+				);
+
+			new Setting(guardFold.inner)
+				.setName("Keep Obsidian's Auto full screen on")
+				.setDesc("Turns Obsidian's own Auto full screen setting (Settings → Interface) back on if it gets switched off. That setting hides the note title bar and bottom bar while you scroll down.")
+				.addToggle((t) =>
+					t.setValue(p.settings.fsgKeepAuto !== false).onChange(async (v) => {
+						p.settings.fsgKeepAuto = v;
+						await p.saveSettings();
+					})
+				);
+
+			new Setting(guardFold.inner)
+				.setName('Camera position')
+				.setDesc('Which edge of the screen the camera hole is on. "Top of phone" follows the phone when it is turned: in landscape the camera edge becomes the left or right side. Change it only if the space is reserved on the wrong side.')
+				.addDropdown((d) =>
+					d
+						.addOptions({ 'device-top': 'Top of phone (follows rotation)', top: 'Always the top of the screen', left: 'Always the left side', right: 'Always the right side' })
+						.setValue(p.settings.fsgCameraEdge)
+						.onChange(async (v) => {
+							p.settings.fsgCameraEdge = v;
+							await p.saveSettings();
+							guardReadout(true);
+						})
+				);
+
+			slider(
+				'Keep this much space clear (px)',
+				'The least space kept free on the camera edge. 0 uses only what Android reports, which is right when Android already reports the cutout. If notes or bars still touch the camera, raise this until they clear it. The space is never added twice: the larger of this number and what Android reports is used.',
+				'fsgPadding',
+				0,
+				120,
+				1,
+				() => guardReadout(true),
+				guardFold.inner
+			);
+
+			readoutRow = new Setting(guardFold.inner)
+				.setName('What Android reports right now')
+				.addButton((b) => b.setButtonText('Refresh').onClick(() => guardReadoutNow()));
+			guardReadoutNow();
+		}
 	}
 
 	// Fine control for a slider: a minus and a plus button that move it exactly one step (hold to repeat), and a
@@ -6080,6 +6627,7 @@ class MinimapSettingTab extends PluginSettingTab {
 }
 
 NoteMinimapPlugin.classify = (text) => classify(text, 0).items;
+NoteMinimapPlugin.FullScreenGuard = FullScreenGuard;
 module.exports = NoteMinimapPlugin;
 
 /* nosourcemap */

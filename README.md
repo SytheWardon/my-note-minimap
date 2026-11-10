@@ -44,12 +44,25 @@ Open **Settings → My Note Minimap [Scrollbar]**. Every slider has − and + bu
 | **Scrolling** | Smooth scrolling and glide length, ignore small finger movements, screen refresh rate, animate the top and bottom bars. |
 | **Performance** | Get ready at start-up, faster loading, hold back jumps, scroll diagnostics. |
 | **Other** | Hide on mobile, and files or folders to exclude. |
+| **Experimental** | Full Screen Guard (off by default): force full screen, keep Auto full screen on, camera position, space to keep clear, and what Android reports. |
 
 **Track when idle** (new in 6.3): *Fades away* (default) fades the faint track behind the bar out a moment after you stop scrolling and brings it back when you scroll. *Stays visible* keeps it there.
 
 **Hide Obsidian scrollbar** (new in 6.3.2, on by default): the plugin hides Obsidian's built-in scrollbar in the editing, preview and reading views each time it starts, so it no longer clashes with the plugin's bar. Turn it off to get the native scrollbar back straight away, and turning the plugin off also brings it back. This replaces the old `hide-scrollbar.css` snippet, so you can remove that snippet. It is separate from **Hide scrollbar**, which hides the plugin's own bar.
 
 Commands in the command palette: **Check for updates**, and an empty **Do nothing (pull-down action)** used by the first-run setup on Obsidian versions before 1.15.
+
+## Experimental: Full Screen Guard
+
+**Experimental, and off by default.** Phone app only (it does nothing on desktop). It was a separate plugin and is now built in. Turn it on under **Settings → My Note Minimap → Experimental**; its rows then open below the switch.
+
+- **Force full screen.** Keeps the Android status bar hidden. Obsidian's Auto full screen hides it while you scroll down and shows it again when you scroll up or close the keyboard; the guard ignores those "show" requests and hides it again after rotating, returning to the app and closing the keyboard.
+- **Keep Obsidian's Auto full screen on.** Switches Obsidian's own setting back on if it gets turned off.
+- **Camera position** and **Keep this much space clear (px).** Keeps at least that much space free on the camera's edge so notes and bars never go under it (the larger of the number and what Android reports is used, so it is never added twice). The edge follows the phone when rotated. The slider has the usual − and + buttons, a number, a glide and a reset button. The minimap's own margins follow this space.
+- **What Android reports right now** shows the four values Android gives the app, to help choose the number.
+- Also a command: **Toggle forced full screen (experimental)**.
+
+While it is off nothing runs. Turning it off puts everything back: the status bar returns and the extra space is removed. Limits: the bottom navigation bar cannot be hidden by a plugin, and a black strip at the top can only be changed in Android's own display settings for the app. If you still have the separate *Full Screen Guard* plugin, disable it, since both would do the same job.
 
 ## Good to know
 
@@ -73,6 +86,8 @@ Nothing is sent about you or your notes. No analytics, no telemetry.
 
 Recent versions in short. Older notes are at the bottom.
 
+- **6.4.3:** Full Screen Guard's slider and plus/minus buttons no longer stutter. A changed value is now applied once you pause (at most 0.9 s into a long drag) instead of on every step, and the "What Android reports" line is redrawn once after the last step. Switching the Guard on or off is still immediate.
+- **6.4.2:** Full Screen Guard is merged in as an **experimental** setting, **off by default**, with its slider, number and the same open/close animation as the other settings groups. Nothing changes until it is switched on.
 - **6.4.1:** Version bump only; no change in behaviour.
 - **6.4.0:** Checked against Obsidian 1.15.0. The pull-down Quick Action is now turned off with Obsidian's own *Disabled* value (an empty one), so no label or prompt appears and the plugin no longer watches the screen on each touch for one; versions before 1.15 keep the empty-command method. The first-run setup now opens Settings → Interface, where Obsidian 1.15 moved this setting (older versions: Mobile), and redraws it after the change. A Quick Action left on the old empty command is switched to *Disabled* on 1.15+.
 - **6.3.2:** New setting **Hide Obsidian scrollbar** (on by default). The plugin now hides Obsidian's own scrollbar at start-up and puts it back when switched off or unloaded, replacing the `hide-scrollbar.css` snippet.
