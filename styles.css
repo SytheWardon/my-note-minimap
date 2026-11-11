@@ -654,6 +654,16 @@ html body.nm-animate-bars.is-hidden-nav .mobile-navbar {
 	pointer-events: none;
 }
 
+/* Obsidian's sliding sidebar moves the bottom bar sideways itself: it sets (and later clears) an inline transform on the
+   bar while the sidebar opens, sits open and closes, and for a swipe it even turns the bar's own transition off. The
+   transition above must stay out of that: on the same transform it made the bar wait at the far edge and then jump
+   into place when you came back from the sidebar. So whenever Obsidian has put its own transform on the bar, the slide
+   above and its separate graphics layer step aside; they are back the moment Obsidian clears it. */
+html body.nm-animate-bars.nm-animate-bars .mobile-navbar[style*="transform"] {
+	transition: none;
+	will-change: auto;
+}
+
 html body.nm-animate-bars.nm-bars-hidden .view-header,
 html body.nm-animate-bars.is-hidden-nav .view-header {
 	transform: translateY(calc(-100% - 28px));
@@ -1686,4 +1696,92 @@ html body.nm-hold-lite.nm-hold-lite .workspace-tab-header-container {
 	-webkit-text-fill-color: var(--text-normal);
 	opacity: 1;
 	visibility: visible;
+}
+
+/* Page bookmarks (long-press the search button) */
+.nm-bm-modal .nm-bm-sub {
+	color: var(--text-muted);
+	margin: 0 0 10px;
+	font-size: var(--font-ui-small);
+}
+.nm-bm-modal .nm-bm-input {
+	width: 100%;
+	min-height: 44px;
+	margin: 0 0 12px;
+	font-size: var(--font-ui-medium);
+}
+.nm-bm-modal .nm-bm-actions {
+	display: flex;
+	justify-content: flex-end;
+	gap: 10px;
+}
+.nm-bm-modal .nm-bm-actions button {
+	min-height: 40px;
+	min-width: 84px;
+}
+.nm-bm-modal .nm-bm-empty {
+	color: var(--text-muted);
+	padding: 14px 4px;
+}
+.nm-bm-modal .nm-bm-head {
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+	margin: 14px 4px 4px;
+}
+.nm-bm-modal .nm-bm-list {
+	max-height: 60vh;
+	overflow-y: auto;
+}
+.nm-bm-modal .nm-bm-row {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	border-radius: var(--radius-m);
+}
+.nm-bm-modal .nm-bm-main {
+	flex: 1 1 auto;
+	min-width: 0;
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	min-height: 52px;
+	padding: 6px 8px;
+	border-radius: var(--radius-m);
+	cursor: pointer;
+}
+.nm-bm-modal .nm-bm-main:active {
+	background: var(--background-modifier-hover);
+}
+.nm-bm-modal .nm-bm-icon {
+	flex: 0 0 auto;
+	color: var(--interactive-accent);
+	display: flex;
+}
+.nm-bm-modal .nm-bm-text {
+	min-width: 0;
+}
+.nm-bm-modal .nm-bm-name {
+	font-weight: var(--font-semibold);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.nm-bm-modal .nm-bm-note {
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.nm-bm-modal .nm-bm-btn {
+	flex: 0 0 auto;
+	width: 44px;
+	height: 44px;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	background: transparent;
+	box-shadow: none;
 }

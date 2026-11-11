@@ -9,6 +9,7 @@ An [Obsidian](https://obsidian.md) plugin that adds a scrollbar or a colour-code
 - **Arrow buttons** (scrollbar style): tap to jump to the next or previous heading, hold to keep scrolling.
 - **Page bubble:** while you scroll, a small bubble shows where you are, like *3 of 12* or a percent.
 - **Page vibration** on phones: a light buzz as you cross into a new page.
+- **Page bookmarks** (new in 6.4.4): long-press the search button to bookmark the page you are on and to open all your bookmarks, across every note and tab.
 - **Easy to restyle:** bar colour, width, shape, opacity, glow, and which side it sits on. The bar width adapts to your screen by default.
 - **Smooth motion:** the bubble and the bar's track fade in and out together, and the top and bottom bars can slide away while you scroll.
 - **Fits your device:** margins scale with your screen, so nothing sits under notches, the header buttons or the bottom bar.
@@ -37,7 +38,7 @@ Open **Settings → My Note Minimap [Scrollbar]**. Every slider has − and + bu
 | --- | --- |
 | **Updates** | Optional update check (off by default) and a button to check now. |
 | **Controls** | Touch on/off, **Hide Obsidian scrollbar**, hide the bar, show the hand button in the header. |
-| **Look** | **Style**, **Side**, the page bubble (what it shows, page length), page vibration. |
+| **Look** | **Style**, **Side**, the page bubble (what it shows, page length), page vibration, **Page bookmarks**. |
 | **Scrollbar look** | Bar width (automatic by default), shape, colour, opacity, **Show track**, **Track when idle**, glow. |
 | **Margins and arrows** | Top, bottom and edge margins (automatic per device), touch area, arrow buttons, arrow size, what a tap does, step size, hold speed. |
 | **Minimap only** | Fast rendering, width, margins, top offset, height. |
@@ -64,6 +65,22 @@ Commands in the command palette: **Check for updates**, and an empty **Do nothin
 
 While it is off nothing runs. Turning it off puts everything back: the status bar returns and the extra space is removed. Limits: the bottom navigation bar cannot be hidden by a plugin, and a black strip at the top can only be changed in Android's own display settings for the app. If you still have the separate *Full Screen Guard* plugin, disable it, since both would do the same job.
 
+## Page bookmarks
+
+**Settings → My Note Minimap → Page bookmarks** (on by default; turn it off and the search button works exactly as Obsidian made it, with nothing listening at all).
+
+**Long-press the search button** in the bottom bar (about half a second, finger kept still, with a light buzz) and a menu opens:
+
+1. **Bookmark this page (Page 23)** asks for a name. It is filled in as *Page 23*, the page number the bubble shows, and you can type anything you like. If this page is already bookmarked, it says *Edit this bookmark* instead, so a page is never saved twice.
+2. **Bookmarks (5)** opens the list of every bookmarked page, in every note. Your current note's bookmarks come first under *This note*, the rest under *Other notes* with the note's name. **Tap** a bookmark to go there, the **pencil** renames it, the **bin** deletes it. With more than eight bookmarks a filter box appears.
+
+A normal tap on the search button still opens Obsidian's quick switcher; only a long press is taken over, and the tap that ends it is cancelled so the quick switcher does not open too.
+
+- **Across tabs and notes.** A bookmark belongs to a note, not to a tab. Tapping one switches to the tab that already has that note open, or opens the note in the current tab, and moves to the bookmarked place. Bookmarks follow a note (or folder) when it is renamed or moved and are removed when it is deleted.
+- **How the place is kept.** As the note's scroll position (a line number, the one Obsidian uses to jump to a heading), with the page and page count it had when saved, so rotating the phone does not move it. A large note that is still laying itself out when it opens is checked a few times and put back, until you touch the screen.
+- **Commands** for the command palette (and desktop, which has no bottom bar): *Bookmark this page* and *Show page bookmarks*.
+- **Editing a note moves lines.** The place is a line number, so text added or removed above a bookmark moves where it lands, by about as many lines as were added or removed.
+
 ## Good to know
 
 - **Speed.** The minimap is drawn on one canvas, only the part you can see is painted, and it redraws only when something changed, so long notes cost no more than short ones. If a very long or heavy note still stutters on an older phone, switch to the scrollbar style. Leave **Fast rendering** on.
@@ -86,6 +103,8 @@ Nothing is sent about you or your notes. No analytics, no telemetry.
 
 Recent versions in short. Older notes are at the bottom.
 
+- **6.4.5:** Fixes the bottom bar glitching after a bookmark jump and when coming back to a note from the sidebar. While a bookmark is put in place, Obsidian no longer takes the note's own scrolling for yours, so the bars stop hiding and showing; and the bar's slide no longer runs on top of Obsidian's own sideways slide of the bar with the sidebar, so it no longer waits at the screen edge and jumps.
+- **6.4.4:** New **Page bookmarks**: long-press the search button to bookmark the current page (named *Page 23* by default, renamable) and to open the list of all bookmarks across every note and tab; tap one to go there. A setting turns it on or off; with it off nothing listens. Commands *Bookmark this page* and *Show page bookmarks*.
 - **6.4.3:** Full Screen Guard's slider and plus/minus buttons no longer stutter. A changed value is now applied once you pause (at most 0.9 s into a long drag) instead of on every step, and the "What Android reports" line is redrawn once after the last step. Switching the Guard on or off is still immediate.
 - **6.4.2:** Full Screen Guard is merged in as an **experimental** setting, **off by default**, with its slider, number and the same open/close animation as the other settings groups. Nothing changes until it is switched on.
 - **6.4.1:** Version bump only; no change in behaviour.

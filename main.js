@@ -1,7 +1,7 @@
 'use strict';
 
 const obsidian = require('obsidian');
-const { Plugin, MarkdownView, PluginSettingTab, Setting, Platform, Notice, Modal, debounce, setIcon, requestUrl } = obsidian;
+const { Plugin, MarkdownView, PluginSettingTab, Setting, Platform, Notice, Modal, Menu, TFile, debounce, setIcon, requestUrl } = obsidian;
 
 // Obsidian's own setting for the pull-down Quick Action (Settings > Interface > Configure mobile Quick Action; older
 // versions had it under Settings > Mobile).
@@ -28,7 +28,7 @@ const UPDATE_EVERY_MS = 24 * 60 * 60 * 1000; // the automatic check runs at most
 // The version of this code. It travels inside main.js, so it is always the version that is actually running (Obsidian
 // only reads manifest.json at start-up, and reading it from disk ourselves caused a hitch). Keep it equal to the
 // version in manifest.json; the release workflow refuses to publish if they differ.
-const PLUGIN_VERSION = '6.4.3';
+const PLUGIN_VERSION = '6.4.5';
 
 // 1 if version a is newer than b, -1 if older, 0 if the same ("1.2.3" style, a leading "v" is ignored).
 function cmpVer(a, b) {
@@ -103,6 +103,8 @@ const DEFAULTS = {
 	fsgKeepAuto: true, // keep Obsidian's own "Auto full screen" setting on
 	fsgCameraEdge: 'device-top', // device-top | top | left | right
 	fsgPadding: 0, // least space (px) kept clear on the camera's edge; 0 = only what Android reports
+	bookmarksOn: true, // long-press the search button: bookmark this page / list of bookmarks
+	bookmarks: [], // { id, path, name, line, page, total, t }
 };
 
 // The minimap's own edge gap when you have not set one: about where the header's buttons end on a phone, so the
@@ -892,6 +894,545 @@ class FullScreenGuard {
 	}
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Page bookmarks
+//
+// Long-press the search button in Obsidian's bottom bar (phones) and a menu opens:
+//     Bookmark this page (Page 23)
+//     ---------------------------
+//     Bookmarks (5)                 -> a list of every bookmarked page, in every note; tap one to go there
+// "Bookmark this page" asks for a name, filled in as "Page 23" (the page the bubble shows) for you to keep or change.
+//
+// How it works with Obsidian (the bar is built in Obsidian's app.js as .mobile-navbar-action-quick-switcher, with a
+// click handler directly on it that opens the quick switcher):
+//   - a hold of about half a second, with the finger staying put, opens the menu; the click that follows when the
+//     finger lifts is cancelled in the capture phase, before it reaches the button, so the quick switcher does not
+//     open as well. A normal tap is never touched.
+//   - a bookmark keeps the note's path and Obsidian's own scroll value for the top of the screen (a line number),
+//     plus the page and page count it had then. Going there uses Obsidian's own way of moving to a place
+//     (openFile with a scroll state, or setEphemeralState), the same one links and history use.
+//   - bookmarks belong to notes, not to tabs: tapping one switches to the tab that already has that note open, or
+//     opens the note in the current tab. They follow a note when it is renamed or moved, and go when it is deleted.
+// Everything is off (no listeners at all) while Settings > Page bookmarks is off.
+// ---------------------------------------------------------------------------------------------------------------
+const BM_HOLD_MS = 480; // how long the search button is held before the menu opens
+const BM_MOVE_PX = 12; // moving the finger further than this is a swipe, not a hold
+
+class BookmarkNameModal extends Modal {
+	constructor(app, opts) {
+		super(app);
+		this.opts = opts;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.addClass('nm-bm-modal');
+		this.titleEl.setText(this.opts.title);
+		if (this.opts.subtitle) contentEl.createDiv({ cls: 'nm-bm-sub', text: this.opts.subtitle });
+		const input = contentEl.createEl('input', { type: 'text', cls: 'nm-bm-input' });
+		input.setAttribute('placeholder', 'Bookmark name');
+		input.setAttribute('enterkeyhint', 'done');
+		input.setAttribute('maxlength', '80');
+		input.value = this.opts.value;
+		const row = contentEl.createDiv({ cls: 'nm-bm-actions' });
+		const cancel = row.createEl('button', { text: 'Cancel' });
+		const save = row.createEl('button', { text: 'Save', cls: 'mod-cta' });
+		const done = () => {
+			const v = input.value.trim() || this.opts.fallback || this.opts.value;
+			this.close();
+			this.opts.onSubmit(v);
+		};
+		save.addEventListener('click', done);
+		cancel.addEventListener('click', () => this.close());
+		input.addEventListener('keydown', (e) => {
+			if (e.key === 'Enter') {
+				e.preventDefault();
+				done();
+			}
+		});
+		window.setTimeout(() => {
+			input.focus();
+			input.select();
+		}, 60);
+	}
+
+	onClose() {
+		this.contentEl.empty();
+	}
+}
+
+class BookmarksModal extends Modal {
+	constructor(app, bm) {
+		super(app);
+		this.bm = bm;
+		this.filter = '';
+	}
+
+	onOpen() {
+		this.titleEl.setText('Page bookmarks');
+		this.contentEl.addClass('nm-bm-modal');
+		this.render();
+	}
+
+	onClose() {
+		this.contentEl.empty();
+	}
+
+	render() {
+		const c = this.contentEl;
+		c.empty();
+		const all = this.bm.list;
+		if (!all.length) {
+			c.createDiv({ cls: 'nm-bm-empty', text: 'No bookmarks yet. Long-press the search button and choose "Bookmark this page".' });
+			return;
+		}
+		if (all.length > 8) {
+			const box = c.createEl('input', { type: 'text', cls: 'nm-bm-input nm-bm-filter' });
+			box.setAttribute('placeholder', 'Filter bookmarks');
+			box.value = this.filter;
+			box.addEventListener('input', () => {
+				this.filter = box.value;
+				this.renderList(listEl);
+			});
+		}
+		const listEl = c.createDiv({ cls: 'nm-bm-list' });
+		this.renderList(listEl);
+	}
+
+	renderList(listEl) {
+		listEl.empty();
+		const q = this.filter.trim().toLowerCase();
+		const here = this.bm.activePath();
+		const match = (b) => !q || b.name.toLowerCase().includes(q) || this.bm.noteName(b).toLowerCase().includes(q);
+		const mine = this.bm.list.filter((b) => b.path === here && match(b)).sort((a, b) => a.line - b.line);
+		const other = this.bm.list
+			.filter((b) => b.path !== here && match(b))
+			.sort((a, b) => this.bm.noteName(a).localeCompare(this.bm.noteName(b)) || a.line - b.line);
+		if (!mine.length && !other.length) {
+			listEl.createDiv({ cls: 'nm-bm-empty', text: 'Nothing matches.' });
+			return;
+		}
+		if (mine.length) {
+			listEl.createDiv({ cls: 'nm-bm-head', text: 'This note' });
+			for (const b of mine) this.row(listEl, b, false);
+		}
+		if (other.length) {
+			if (mine.length) listEl.createDiv({ cls: 'nm-bm-head', text: 'Other notes' });
+			for (const b of other) this.row(listEl, b, true);
+		}
+	}
+
+	row(parent, b, showNote) {
+		const row = parent.createDiv({ cls: 'nm-bm-row' });
+		const main = row.createDiv({ cls: 'nm-bm-main' });
+		const ic = main.createSpan({ cls: 'nm-bm-icon' });
+		setIcon(ic, 'bookmark');
+		const txt = main.createDiv({ cls: 'nm-bm-text' });
+		txt.createDiv({ cls: 'nm-bm-name', text: b.name });
+		const sub = (showNote ? this.bm.noteName(b) + ' \u00b7 ' : '') + (b.page ? 'Page ' + b.page + (b.total ? ' of ' + b.total : '') : 'Saved place');
+		txt.createDiv({ cls: 'nm-bm-note', text: sub });
+		main.addEventListener('click', () => {
+			this.close();
+			this.bm.go(b);
+		});
+		const edit = row.createEl('button', { cls: 'nm-bm-btn clickable-icon', attr: { 'aria-label': 'Rename' } });
+		setIcon(edit, 'pencil');
+		edit.addEventListener('click', () => {
+			new BookmarkNameModal(this.app, {
+				title: 'Rename bookmark',
+				subtitle: this.bm.noteName(b),
+				value: b.name,
+				onSubmit: (v) => {
+					b.name = v;
+					this.bm.changed();
+					this.render();
+				},
+			}).open();
+		});
+		const del = row.createEl('button', { cls: 'nm-bm-btn clickable-icon', attr: { 'aria-label': 'Delete' } });
+		setIcon(del, 'trash-2');
+		del.addEventListener('click', () => {
+			this.bm.remove(b);
+			this.render();
+		});
+	}
+}
+
+class PageBookmarks {
+	constructor(plugin) {
+		this.plugin = plugin;
+		this.app = plugin.app;
+		this.isReady = false;
+		this.on = false;
+		this.offs = [];
+		this.refs = [];
+		this.timer = 0;
+		this.hold = null;
+		this.eating = false; // the click that follows a long press is to be swallowed
+		this.cleanups = new Set(); // follow-up checks still running after going to a bookmark
+	}
+
+	get list() {
+		const s = this.plugin.settings;
+		if (!Array.isArray(s.bookmarks)) s.bookmarks = [];
+		return s.bookmarks;
+	}
+
+	wanted() {
+		return !this.plugin._unloaded && this.isReady && this.plugin.settings.bookmarksOn !== false;
+	}
+
+	ready() {
+		this.isReady = true;
+		this.sync();
+	}
+
+	// Starts or stops to match the setting. Cheap when nothing changed.
+	sync() {
+		if (this.wanted()) this.start();
+		else this.stop();
+	}
+
+	// ----- the long press ---------------------------------------------------------------------------------------
+
+	searchButton(el) {
+		const a = el && el.closest ? el.closest('.mobile-navbar-action') : null;
+		if (!a) return null;
+		if (a.classList.contains('mobile-navbar-action-quick-switcher')) return a;
+		return a.querySelector('.lucide-search, [data-icon="search"]') ? a : null; // other builds of the bar
+	}
+
+	start() {
+		if (this.on) return;
+		this.on = true;
+		const add = (target, type, fn, opts) => {
+			target.addEventListener(type, fn, opts);
+			this.offs.push(() => target.removeEventListener(type, fn, opts));
+		};
+		add(document, 'pointerdown', (e) => this.down(e), { capture: true, passive: true });
+		add(document, 'pointermove', (e) => this.move(e), { capture: true, passive: true });
+		add(document, 'pointerup', () => this.cancel(), { capture: true, passive: true });
+		add(document, 'pointercancel', () => this.cancel(), { capture: true, passive: true });
+		// Cancels the click that ends a long press, before it reaches the button's own handler (quick switcher).
+		add(document, 'click', (e) => this.click(e), { capture: true });
+		// Android also raises a context menu on a long press: not on this button.
+		add(document, 'contextmenu', (e) => {
+			if (this.hold || this.eating || this.searchButton(e.target)) e.preventDefault();
+		}, { capture: true });
+		const vault = this.app.vault;
+		this.refs.push([vault, vault.on('rename', (f, old) => this.renamed(f, old))]);
+		this.refs.push([vault, vault.on('delete', (f) => this.deleted(f))]);
+	}
+
+	stop() {
+		if (!this.on) return;
+		this.on = false;
+		this.cancel();
+		this.eating = false;
+		for (const f of Array.from(this.cleanups)) f(); // no follow-up check outlives the feature
+		for (const off of this.offs.splice(0)) off();
+		for (const [owner, ref] of this.refs.splice(0)) {
+			try {
+				owner.offref(ref);
+			} catch (e) {
+				/* already gone */
+			}
+		}
+	}
+
+	down(e) {
+		this.eating = false; // a new touch begins: whatever click was waiting is over
+		this.cancel();
+		if (e.pointerType === 'mouse' && e.button !== 0) return;
+		const btn = this.searchButton(e.target);
+		if (!btn) return;
+		this.hold = { x: e.clientX, y: e.clientY, btn };
+		this.timer = window.setTimeout(() => this.fire(), BM_HOLD_MS);
+	}
+
+	move(e) {
+		if (!this.hold || this.timer === 0) return;
+		if (Math.hypot(e.clientX - this.hold.x, e.clientY - this.hold.y) > BM_MOVE_PX) this.cancel();
+	}
+
+	cancel() {
+		if (this.timer) window.clearTimeout(this.timer);
+		this.timer = 0;
+		this.hold = null;
+	}
+
+	click(e) {
+		if (!this.eating) return;
+		this.eating = false;
+		e.stopImmediatePropagation();
+		e.preventDefault();
+	}
+
+	fire() {
+		const hold = this.hold;
+		this.timer = 0;
+		if (!hold || !this.wanted()) return;
+		this.eating = true;
+		try {
+			if (CAN_BUZZ && Platform.isMobile) navigator.vibrate(14);
+		} catch (err) {
+			/* no buzz */
+		}
+		const r = hold.btn.getBoundingClientRect();
+		this.showMenu(r.left + r.width / 2, r.top);
+	}
+
+	// ----- the menu ---------------------------------------------------------------------------------------------
+
+	showMenu(x, y) {
+		const here = this.here();
+		const same = here ? this.findSame(here) : null;
+		const menu = new Menu();
+		menu.addItem((it) => {
+			it.setTitle(same ? 'Edit this bookmark (' + same.name + ')' : here ? 'Bookmark this page (' + here.label + ')' : 'Bookmark this page (open a note first)');
+			it.setIcon(same ? 'bookmark-check' : 'bookmark-plus');
+			if (!here) it.setDisabled(true);
+			else it.onClick(() => this.save(here, same));
+		});
+		menu.addSeparator();
+		menu.addItem((it) => {
+			const n = this.list.length;
+			it.setTitle(n ? 'Bookmarks (' + n + ')' : 'Bookmarks');
+			it.setIcon('bookmark');
+			it.onClick(() => this.open());
+		});
+		menu.showAtPosition({ x, y });
+	}
+
+	open() {
+		new BookmarksModal(this.app, this).open();
+	}
+
+	save(here, same) {
+		new BookmarkNameModal(this.app, {
+			title: same ? 'Edit bookmark' : 'Bookmark this page',
+			subtitle: this.noteName(here),
+			value: same ? same.name : here.label,
+			fallback: here.label,
+			onSubmit: (name) => {
+				if (same) {
+					same.name = name;
+				} else {
+					this.list.push({ id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), path: here.path, name, line: here.line, page: here.page, total: here.total, t: Date.now() });
+				}
+				this.changed();
+				new Notice(same ? 'Bookmark updated.' : 'Bookmarked: ' + name);
+			},
+		}).open();
+	}
+
+	// ----- where you are ----------------------------------------------------------------------------------------
+
+	activePath() {
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		return view && view.file ? view.file.path : '';
+	}
+
+	noteName(b) {
+		const p = b.path || '';
+		const base = p.split('/').pop() || p;
+		return base.replace(/\.md$/i, '');
+	}
+
+	// The note on screen, the place at the top of it (Obsidian's own scroll value) and the page number the bubble shows.
+	here() {
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (!view || !view.file) return null;
+		let line = null;
+		try {
+			const v = view.currentMode.getScroll(); // where the note really is (null while a reading view is still being measured)
+			if (typeof v === 'number' && Number.isFinite(v)) line = v;
+		} catch (e) {
+			/* try the next way */
+		}
+		if (line === null) {
+			try {
+				const e = view.getEphemeralState();
+				if (e && typeof e.scroll === 'number') line = e.scroll;
+			} catch (e) {
+				/* leave it at the top */
+			}
+		}
+		let info = null;
+		try {
+			const st = { view, scroller: this.plugin.findScroller(view), boundMode: view.getMode ? view.getMode() : 'source', peekWait: 0 };
+			if (st.scroller) info = this.plugin.pageInfoCalc(st);
+		} catch (e) {
+			info = null;
+		}
+		const page = info ? info.page : null;
+		return {
+			path: view.file.path,
+			line: line === null ? 0 : Math.round(line * 100) / 100,
+			page,
+			total: info ? info.total : null,
+			label: page ? 'Page ' + page : 'Bookmark',
+		};
+	}
+
+	// A bookmark already on this page of this note (a second one there would only repeat it).
+	findSame(here) {
+		return this.list.find((b) => b.path === here.path && (here.page ? b.page === here.page : Math.abs(b.line - here.line) < 1)) || null;
+	}
+
+	// ----- going there ------------------------------------------------------------------------------------------
+
+	async go(b) {
+		const app = this.app;
+		const ws = app.workspace;
+		const file = app.vault.getAbstractFileByPath(b.path);
+		if (!file || !(file instanceof TFile)) {
+			new Notice('That note is gone, so this bookmark cannot open.');
+			return;
+		}
+		const open = ws.getLeavesOfType('markdown').filter((l) => l.view && l.view.file && l.view.file.path === b.path);
+		let leaf = open.find((l) => l === ws.activeLeaf) || open[0] || null;
+		try {
+			if (leaf) {
+				// Already open in a tab: switch to that tab.
+				if (typeof ws.revealLeaf === 'function') await ws.revealLeaf(leaf);
+				ws.setActiveLeaf(leaf, { focus: true });
+			} else {
+				leaf = ws.getLeaf(false); // this tab
+				await leaf.openFile(file, { eState: { scroll: b.line }, active: true });
+			}
+		} catch (e) {
+			new Notice('Could not open that bookmark.');
+			console.error('My Note Minimap: bookmark', e);
+			return;
+		}
+		this.land(leaf, b.line);
+	}
+
+	// Puts the note on the bookmarked place and keeps checking for a moment. A large note is still being laid out when it
+	// opens, and where it lands can slide while it is, so a few checks put it back, until you touch the screen.
+	land(leaf, line) {
+		const view = leaf && leaf.view;
+		if (!(view instanceof MarkdownView)) return;
+		// The note scrolls by itself here, up to four times. Obsidian reads every scroll as the reader's own and hides
+		// or shows the top and bottom bars to match, so the bars flickered and slid on each check. For this short while
+		// its hide-on-scroll is told to ignore the scrolling (it still keeps track of where the note is), and the bars
+		// are put back in place.
+		const unquiet = this.quietNav();
+		this.showBars();
+		const set = () => {
+			try {
+				view.setEphemeralState({ scroll: line });
+			} catch (e) {
+				/* not ready yet: the next check */
+			}
+		};
+		set();
+		let touched = false;
+		const stop = () => {
+			touched = true;
+			unquiet(); // the reader's own scrolling is Obsidian's again from the first touch
+		};
+		const evs = ['pointerdown', 'wheel', 'keydown'];
+		for (const ev of evs) document.addEventListener(ev, stop, true);
+		const timers = [250, 700, 1500, 3000].map((ms) =>
+			window.setTimeout(() => {
+				if (touched || this.plugin._unloaded) return;
+				let cur = null;
+				try {
+					cur = view.currentMode.getScroll();
+				} catch (e) {
+					/* unknown */
+				}
+				if (typeof cur !== 'number' || Math.abs(cur - line) > 2) set();
+			}, ms)
+		);
+		const done = () => {
+			for (const ev of evs) document.removeEventListener(ev, stop, true);
+			timers.forEach((t) => window.clearTimeout(t));
+			window.clearTimeout(endT);
+			this.cleanups.delete(done);
+			unquiet();
+			if (!touched) this.showBars();
+		};
+		const endT = window.setTimeout(done, 3300);
+		this.cleanups.add(done);
+	}
+
+	// Makes Obsidian's hide-on-scroll for the bars (mobileNavbar.onScroll) ignore scrolling until the returned function is
+	// called. It still records where the note is, so the first scroll by the reader is measured from the right place.
+	// Only one such hold at a time; a second call (another bookmark tapped quickly) gets a function that does nothing.
+	quietNav() {
+		const nav = this.app && this.app.mobileNavbar;
+		if (!nav || typeof nav.onScroll !== 'function' || this._navHold) return () => {};
+		const orig = nav.onScroll;
+		const own = Object.prototype.hasOwnProperty.call(nav, 'onScroll');
+		const hold = function (el, pos) {
+			try {
+				if (this.scrollTops && typeof this.scrollTops.set === 'function') this.scrollTops.set(el, pos);
+			} catch (e) {
+				/* nothing to keep track of */
+			}
+		};
+		this._navHold = hold;
+		nav.onScroll = hold;
+		return () => {
+			if (this._navHold !== hold) return; // already given back
+			this._navHold = null;
+			if (nav.onScroll !== hold) return; // something else took the method over meanwhile: leave it alone
+			if (own) nav.onScroll = orig;
+			else delete nav.onScroll;
+		};
+	}
+
+	// Brings the top and bottom bars back if they are away (Obsidian's hide-on-scroll or this plugin's own slide).
+	showBars() {
+		try {
+			const nav = this.app && this.app.mobileNavbar;
+			if (nav && typeof nav.restoreNavigation === 'function') nav.restoreNavigation(true);
+			if (typeof this.plugin.setBars === 'function') this.plugin.setBars(false);
+		} catch (e) {
+			/* the bars stay as they are */
+		}
+	}
+
+	// ----- keeping the list ---------------------------------------------------------------------------------------
+
+	changed() {
+		this.plugin.saveDirty = true;
+		this.plugin.saveSoon();
+	}
+
+	remove(b) {
+		const i = this.list.indexOf(b);
+		if (i >= 0) this.list.splice(i, 1);
+		this.changed();
+	}
+
+	renamed(file, oldPath) {
+		let any = false;
+		for (const b of this.list) {
+			if (b.path === oldPath) {
+				b.path = file.path;
+				any = true;
+			} else if (b.path.startsWith(oldPath + '/')) {
+				b.path = file.path + b.path.slice(oldPath.length); // a folder was renamed or moved
+				any = true;
+			}
+		}
+		if (any) this.changed();
+	}
+
+	deleted(file) {
+		const n = this.list.length;
+		const keep = this.list.filter((b) => b.path !== file.path && !b.path.startsWith(file.path + '/'));
+		if (keep.length !== n) {
+			this.plugin.settings.bookmarks = keep;
+			this.changed();
+		}
+	}
+}
+
 class NoteMinimapPlugin extends Plugin {
 	// Adds or removes the style tag that hides Obsidian's native scrollbar, following the setting.
 	applyNativeScrollbar() {
@@ -914,6 +1455,9 @@ class NoteMinimapPlugin extends Plugin {
 		this.settings = Object.assign({}, DEFAULTS, saved);
 		// Own copy: the default array is shared, and adding an exclusion would otherwise change the default itself.
 		this.settings.exclusions = Array.isArray(saved.exclusions) ? saved.exclusions.slice() : [];
+		// Page bookmarks: an own list (the default array is shared), keeping only entries that are complete.
+		this.settings.bookmarks = (Array.isArray(saved.bookmarks) ? saved.bookmarks : []).filter((b) => b && typeof b.path === 'string' && typeof b.name === 'string' && typeof b.line === 'number');
+		this.settings.bookmarksOn = this.settings.bookmarksOn !== false;
 		// v2 raised the default touch sizes; upgrade anyone still on the old defaults.
 		if ((saved.ver || 1) < 2) {
 			if (saved.hitWidth === 44) this.settings.hitWidth = DEFAULTS.hitWidth;
@@ -982,6 +1526,37 @@ class NoteMinimapPlugin extends Plugin {
 		// Full Screen Guard (experimental, off by default): does nothing at all until it is switched on in the settings.
 		this.guard = new FullScreenGuard(this);
 		this.app.workspace.onLayoutReady(() => this.guard.ready());
+
+		// Page bookmarks: long-press the search button. Nothing is listening while the setting is off.
+		this.bookmarks = new PageBookmarks(this);
+		this.app.workspace.onLayoutReady(() => this.bookmarks.ready());
+		this.addCommand({
+			id: 'bookmark-this-page',
+			name: 'Bookmark this page',
+			callback: () => {
+				if (this.settings.bookmarksOn === false) {
+					new Notice('Page bookmarks are off. Turn them on in Settings > My Note Minimap.');
+					return;
+				}
+				const here = this.bookmarks.here();
+				if (!here) {
+					new Notice('Open a note first.');
+					return;
+				}
+				this.bookmarks.save(here, this.bookmarks.findSame(here));
+			},
+		});
+		this.addCommand({
+			id: 'show-page-bookmarks',
+			name: 'Show page bookmarks',
+			callback: () => {
+				if (this.settings.bookmarksOn === false) {
+					new Notice('Page bookmarks are off. Turn them on in Settings > My Note Minimap.');
+					return;
+				}
+				this.bookmarks.open();
+			},
+		});
 		this.addCommand({
 			id: 'toggle-forced-full-screen',
 			name: 'Toggle forced full screen (experimental)',
@@ -1406,6 +1981,7 @@ class NoteMinimapPlugin extends Plugin {
 		if (this._guardT) clearTimeout(this._guardT);
 		this._guardT = null;
 		if (this.guard) this.guard.stop();
+		if (this.bookmarks) this.bookmarks.stop();
 		this.applyNativeScrollbar();
 		this.removeStartHook();
 		for (const st of this.states.values()) this.ungateRender(st, true);
@@ -2520,6 +3096,7 @@ class NoteMinimapPlugin extends Plugin {
 	}
 
 	async saveSettings() {
+		if (this.bookmarks) this.bookmarks.sync();
 		if (this.guard) this.guard.syncSoon(); // Full Screen Guard: start or stop at once, apply a changed value after a pause (nothing while it is off)
 		if (this.settings.animateBars && this._barsCls) this.applyBarsLook(); // speed / style of the bars' slide (also after a reset)
 		this.queueFrameRefresh();
@@ -5618,6 +6195,25 @@ class MinimapSettingTab extends PluginSettingTab {
 				);
 		}
 
+		new Setting(containerEl)
+			.setName('Page bookmarks')
+			.setDesc('Long-press the search button in the bottom bar: bookmark the page you are on (named "Page 23" by default, rename it as you like) and open the list of all your bookmarks, in every note and tab. Off: the search button works exactly as Obsidian made it. The commands "Bookmark this page" and "Show page bookmarks" do the same from the command palette.')
+			.addToggle((t) =>
+				t.setValue(p.settings.bookmarksOn !== false).onChange(async (v) => {
+					p.settings.bookmarksOn = v;
+					await p.saveSettings();
+				})
+			);
+		new Setting(containerEl)
+			.setName('Your bookmarks')
+			.setDesc('Every bookmarked page, in every note.')
+			.addButton((b) =>
+				b.setButtonText('Show').onClick(() => {
+					if (p.settings.bookmarksOn === false) new Notice('Page bookmarks are off.');
+					else p.bookmarks.open();
+				})
+			);
+
 		styleFolds.sb = fold(p.settings.style === 'scrollbar');
 		host = styleFolds.sb.inner;
 		{
@@ -6628,6 +7224,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 NoteMinimapPlugin.classify = (text) => classify(text, 0).items;
 NoteMinimapPlugin.FullScreenGuard = FullScreenGuard;
+NoteMinimapPlugin.PageBookmarks = PageBookmarks;
 module.exports = NoteMinimapPlugin;
 
 /* nosourcemap */
