@@ -1698,6 +1698,48 @@ html body.nm-hold-lite.nm-hold-lite .workspace-tab-header-container {
 	visibility: visible;
 }
 
+/* ---- Tab arrows: the pill above the bottom bar saying which tab you moved to ("Tab 2 of 5") ----
+   Placed, shown and animated by the script (it sets bottom, opacity, visibility and transform itself). */
+.nm-ta-pill {
+	position: fixed;
+	left: 50%;
+	z-index: 10000;
+	pointer-events: none;
+	white-space: nowrap;
+	opacity: 0;
+	visibility: hidden;
+	transform: translate(-50%, 0);
+	padding: 12px 22px;
+	border-radius: 999px;
+	font-size: var(--font-ui-medium, 16px);
+	font-variant-numeric: tabular-nums;
+	line-height: 1.2;
+	will-change: transform, opacity;
+	background: var(--background-primary-alt, #1e1e1e);
+	background: color-mix(in srgb, var(--background-primary-alt, #1e1e1e) 90%, transparent);
+	-webkit-backdrop-filter: blur(12px) saturate(1.2);
+	backdrop-filter: blur(12px) saturate(1.2);
+	color: var(--text-normal, #ddd);
+	border: 1px solid var(--background-modifier-border, #444);
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+}
+
+.nm-ta-pill > span {
+	display: inline-block;
+}
+
+/* Pop-ups that move up out of the way of the on-screen keyboard (see KeyboardLift). The move uses the separate
+   translate property, so it never fights the pop-up's own opening animation, and it eases in about the time a keyboard takes to arrive. */
+.modal.nm-kb-lift {
+	transition: translate 240ms cubic-bezier(0.22, 0.9, 0.25, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.modal.nm-kb-lift {
+		transition: none;
+	}
+}
+
 /* Page bookmarks (long-press the search button) */
 .nm-bm-modal .nm-bm-sub {
 	color: var(--text-muted);

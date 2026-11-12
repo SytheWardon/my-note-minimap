@@ -28,7 +28,7 @@ const UPDATE_EVERY_MS = 24 * 60 * 60 * 1000; // the automatic check runs at most
 // The version of this code. It travels inside main.js, so it is always the version that is actually running (Obsidian
 // only reads manifest.json at start-up, and reading it from disk ourselves caused a hitch). Keep it equal to the
 // version in manifest.json; the release workflow refuses to publish if they differ.
-const PLUGIN_VERSION = '6.4.5';
+const PLUGIN_VERSION = '6.5.0';
 
 // 1 if version a is newer than b, -1 if older, 0 if the same ("1.2.3" style, a leading "v" is ignored).
 function cmpVer(a, b) {
@@ -73,10 +73,8 @@ const DEFAULTS = {
 	animateBars: true, // slide/fade the top header and bottom bar while scrolling (with the strip, and Obsidian's own hide-on-scroll)
 	barsMs: 450, // length of that slide, in milliseconds
 	pageBubble: true, // a small circle with the page number pops out of the bar while the note scrolls
-	pageShows: 'page', // what the bubble says: 'page' (3 of 12) or 'percent'
-	pageHapticsBy: 'bubble', // what the buzz counts: 'bubble' (whatever the bubble shows), 'page' or 'percent'
 	arrowTap: 'heading', // what tapping an arrow does: 'step' (scroll Step per tap) or 'heading' (jump to the next or previous heading)
-	pageHaptics: true, // phone or tablet: a light buzz when the page (or, in percent mode, the percent) changes (works with the bubble off too)
+	pageHaptics: true, // phone or tablet: a light buzz when the page changes (works with the bubble off too)
 	pageLen: 1800, // how much text is one page, in characters (counted in the note's text, so no screen can change it)
 	barsStyle: 'slide-fade', // 'slide-fade', 'slide' or 'fade'
 	smoothMs: 340, // length of the glide animation
@@ -98,6 +96,12 @@ const DEFAULTS = {
 	dragSlop: 6, // px: while a finger or pointer is held on the strip, movement smaller than this is ignored (0 = off)
 	exclusions: [],
 	// EXPERIMENTAL: Full Screen Guard (see FullScreenGuard). Off unless switched on under Settings > Experimental.
+	taOn: false, // Tab arrows (the old Tab Arrows plugin): the bottom bar's left and right arrows switch tabs. Off by default
+	taWrap: true, // from the last tab, "next" goes to the first (and the other way round)
+	taPill: true, // a small pill above the bottom bar saying which tab you are on; while on, the tab button shows a tabs icon
+	taTabButton: 'current', // what the tab button shows while the pill is off: 'current' | 'fraction'
+	taBuzz: false, // a tiny buzz when the tab changes
+	taDebug: false, // a small notice for every tap, to see what it sees
 	fsgEnabled: false,
 	fsgForce: true, // keep the status bar hidden
 	fsgKeepAuto: true, // keep Obsidian's own "Auto full screen" setting on
@@ -918,6 +922,184 @@ class FullScreenGuard {
 const BM_HOLD_MS = 480; // how long the search button is held before the menu opens
 const BM_MOVE_PX = 12; // moving the finger further than this is a swipe, not a hold
 
+// ---------------------------------------------------------------------------------------------------------------
+// Keeping a pop-up clear of the on-screen keyboard
+//
+// Phones and tablets differ in what the keyboard does to the page. Some shrink the web view (the pop-up is then already
+// above the keyboard), some leave the view alone and draw the keyboard on top of it (the lower part of a centred pop-up,
+// with its buttons, is hidden), and some change only the "visual viewport". Nothing is assumed: the keyboard's height is
+// taken from every source there is (Obsidian's own keyboard events, its --keyboard-height variable, the visual
+// viewport), the part of it that has not already shrunk the view is kept, and the pop-up is moved up by exactly as much
+// as it needs, with the same ease as the bars. A pop-up taller than the free space is given a maximum height (its
+// content then scrolls) so that the title never leaves the screen. When the keyboard goes, the pop-up glides back.
+// Nothing changes while no text box in the pop-up has the keyboard.
+// ---------------------------------------------------------------------------------------------------------------
+// The window's height with no keyboard in it. It is read whenever the window changes size while no text box has the
+// keyboard (the plugin keeps it up to date from start-up), so a pop-up that opens while a keyboard is already up still
+// knows how much of the keyboard has already shrunk the view.
+const KB_VIEW = { full: 0 };
+function kbTyping(within) {
+	const f = document.activeElement;
+	return !!(f && (!within || within.contains(f)) && (f.tagName === 'INPUT' || f.tagName === 'TEXTAREA' || f.isContentEditable));
+}
+function kbRememberView() {
+	if (!kbTyping()) KB_VIEW.full = window.innerHeight;
+}
+
+class KeyboardLift {
+	constructor(modal) {
+		this.modal = modal;
+		this.el = modal.modalEl;
+		this.on = false;
+		this.offs = [];
+		this.timers = new Set();
+		this.raf = 0;
+		this.told = 0; // the keyboard height an event reported last (0 once it has gone)
+		this.shift = 0; // how far the pop-up is moved up now
+		this.capped = false;
+		this.probe = null;
+	}
+
+	start() {
+		if (this.on || !this.el || !Platform.isMobile) return;
+		this.on = true;
+		if (!KB_VIEW.full) kbRememberView();
+		this.el.addClass('nm-kb-lift');
+		const add = (target, type, fn, opts) => {
+			if (!target || typeof target.addEventListener !== 'function') return;
+			target.addEventListener(type, fn, opts);
+			this.offs.push(() => target.removeEventListener(type, fn, opts));
+		};
+		const shown = (e) => {
+			const h = Number(e && e.keyboardHeight);
+			this.told = Number.isFinite(h) && h > 0 ? h : this.told;
+			this.settle();
+		};
+		const hidden = () => {
+			this.told = 0;
+			this.settle();
+		};
+		add(window, 'keyboardWillShow', shown);
+		add(window, 'keyboardDidShow', shown);
+		add(window, 'keyboardWillHide', hidden);
+		add(window, 'keyboardDidHide', hidden);
+		add(window, 'resize', () => this.queue());
+		add(window, 'orientationchange', () => this.settle());
+		const vv = window.visualViewport;
+		add(vv, 'resize', () => this.queue());
+		add(vv, 'scroll', () => this.queue());
+		add(this.el, 'focusin', () => this.settle());
+		add(this.el, 'focusout', () => this.settle());
+		// The text box takes the focus a moment after the pop-up opens, and keyboards take a while to arrive.
+		this.settle();
+	}
+
+	stop() {
+		if (!this.on) return;
+		this.on = false;
+		for (const off of this.offs.splice(0)) off();
+		for (const t of this.timers) window.clearTimeout(t);
+		this.timers.clear();
+		if (this.raf) window.cancelAnimationFrame(this.raf);
+		this.raf = 0;
+		if (this.probe) this.probe.remove();
+		this.probe = null;
+		const el = this.el;
+		if (el) {
+			el.style.translate = '';
+			el.style.maxHeight = '';
+			el.removeClass('nm-kb-lift');
+		}
+		this.shift = 0;
+	}
+
+	// Looks again now, and a few times while a keyboard is arriving or leaving (some phones send no event at all).
+	settle() {
+		this.queue();
+		for (const ms of [80, 200, 380, 650]) {
+			const t = window.setTimeout(() => {
+				this.timers.delete(t);
+				this.queue();
+			}, ms);
+			this.timers.add(t);
+		}
+	}
+
+	queue() {
+		if (!this.on || this.raf) return;
+		this.raf = window.requestAnimationFrame(() => {
+			this.raf = 0;
+			if (this.on) this.apply();
+		});
+	}
+
+	typing() {
+		return kbTyping(this.el);
+	}
+
+	cssHeight() {
+		try {
+			return parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--keyboard-height')) || 0;
+		} catch (e) {
+			return 0;
+		}
+	}
+
+	// How much of the bottom the visual viewport has lost (iOS, and browsers that keep the layout and shrink the viewport).
+	viewportLoss() {
+		const vv = window.visualViewport;
+		const loss = vv ? window.innerHeight - (vv.height + (vv.offsetTop || 0)) : 0;
+		return Number.isFinite(loss) ? Math.max(0, loss) : 0;
+	}
+
+	// The part of the keyboard that is on top of the view: what is reported, minus whatever already shrank the view.
+	keyboard() {
+		if (!this.typing()) return 0;
+		const resized = Math.max(0, (KB_VIEW.full || window.innerHeight) - window.innerHeight);
+		const told = Math.max(this.told, this.cssHeight());
+		return Math.max(this.viewportLoss(), told - resized, 0);
+	}
+
+	// The notch or status bar at the top of the screen.
+	safeTop() {
+		if (!this.probe || !this.probe.isConnected) {
+			const el = document.body.createDiv();
+			el.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;visibility:hidden;pointer-events:none;padding-top:env(safe-area-inset-top);';
+			this.probe = el;
+		}
+		return parseFloat(getComputedStyle(this.probe).paddingTop) || 0;
+	}
+
+	apply() {
+		const el = this.el;
+		if (!el || !el.isConnected) return;
+		const kb = this.keyboard();
+		let shift = 0;
+		if (kb > 0) {
+			const gap = 10;
+			const keyTop = window.innerHeight - kb - gap;
+			const room = Math.max(160, keyTop - this.safeTop() - 8);
+			// offsetTop and offsetHeight ignore the move below, so the pop-up's own place is read without undoing it.
+			el.style.maxHeight = '';
+			const parent = el.offsetParent;
+			const pt = () => (parent ? parent.getBoundingClientRect().top : 0) + el.offsetTop;
+			if (el.offsetHeight > room) {
+				el.style.maxHeight = Math.floor(room) + 'px';
+				this.capped = true;
+			} else {
+				this.capped = false;
+			}
+			shift = Math.max(0, Math.ceil(pt() + el.offsetHeight - keyTop));
+		} else if (this.capped) {
+			el.style.maxHeight = '';
+			this.capped = false;
+		}
+		if (shift === this.shift) return;
+		this.shift = shift;
+		el.style.translate = shift ? '0 ' + -shift + 'px' : '';
+	}
+}
+
 class BookmarkNameModal extends Modal {
 	constructor(app, opts) {
 		super(app);
@@ -926,6 +1108,8 @@ class BookmarkNameModal extends Modal {
 
 	onOpen() {
 		const { contentEl } = this;
+		this.lift = new KeyboardLift(this); // moves this pop-up up out of the way of the keyboard, on any device
+		this.lift.start();
 		contentEl.addClass('nm-bm-modal');
 		this.titleEl.setText(this.opts.title);
 		if (this.opts.subtitle) contentEl.createDiv({ cls: 'nm-bm-sub', text: this.opts.subtitle });
@@ -957,6 +1141,7 @@ class BookmarkNameModal extends Modal {
 	}
 
 	onClose() {
+		if (this.lift) this.lift.stop();
 		this.contentEl.empty();
 	}
 }
@@ -969,12 +1154,15 @@ class BookmarksModal extends Modal {
 	}
 
 	onOpen() {
+		this.lift = new KeyboardLift(this); // the filter box raises the keyboard too
+		this.lift.start();
 		this.titleEl.setText('Page bookmarks');
 		this.contentEl.addClass('nm-bm-modal');
 		this.render();
 	}
 
 	onClose() {
+		if (this.lift) this.lift.stop();
 		this.contentEl.empty();
 	}
 
@@ -1433,6 +1621,518 @@ class PageBookmarks {
 	}
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Tab arrows (the Tab Arrows plugin 2.0.0, now a setting of this plugin; off by default)
+//
+// The left and right arrows in Obsidian's phone bottom bar normally step back and forward through history. With this on
+// they go to the previous and next TAB, in the order of Obsidian's tab switcher, and holding an arrow still opens
+// Obsidian's history list. A small pill above the bar says which tab you moved to ("Tab 2 of 5"); with the pill off the
+// tab button in the bar can show the current tab instead of the count.
+// It patches none of Obsidian's code: it listens for presses on the two arrows (a tap is handled when the finger lifts, so
+// it does not depend on the browser sending a click) and calls Obsidian's own "switch to this tab". Switching the setting
+// off, or the plugin off, gives the arrows, their labels and the tab button back to Obsidian exactly as they were.
+// Everything is off (no listeners, no observers) while Settings > Tab arrows is off.
+// ---------------------------------------------------------------------------------------------------------------
+const TA_ACTION = '.mobile-navbar-action-back, .mobile-navbar-action-forward';
+const TA_BACK = '.mobile-navbar-action-back .clickable-icon';
+const TA_FORWARD = '.mobile-navbar-action-forward .clickable-icon';
+// A mouse held this long opens Obsidian's history list (its own 400 ms timer). A touch hold is reported by the system
+// as a "contextmenu" event instead, so for touch a press is only a hold if that event came, or it took very long.
+const TA_MOUSE_HOLD = 380;
+const TA_TOUCH_HOLD = 700;
+// After a tap has been handled on pointer-up, the click that follows it is swallowed, not handled a second time.
+const TA_CLICK_WINDOW = 800;
+// A finger that moved further than this (px) between down and up was scrolling, not tapping.
+const TA_SLOP = 14;
+
+// Which tab a step from `current` lands on, or -1 if there is none (one tab only, or the end with no wrap-around).
+// With no known current tab (-1), "next" goes to the first tab and "previous" to the last.
+function taTargetIndex(count, current, dir, wrap) {
+	if (count < 2) return -1;
+	if (current < 0) return dir > 0 ? 0 : count - 1;
+	let i = current + dir;
+	if (i < 0 || i >= count) {
+		if (!wrap) return -1;
+		i = (i + count) % count;
+	}
+	return i;
+}
+
+class TabArrows {
+	constructor(plugin) {
+		this.plugin = plugin;
+		this.app = plugin.app;
+		this.isReady = false;
+		this.on = false;
+		this.offs = [];
+		this.refs = [];
+		this._down = null; // the press in progress: { dir, el, x, y, t, touch, held }
+		this._handled = null; // the tap just handled on pointer-up: { dir, t }
+		this._saved = null;
+		this._watch = null;
+		this._toast = null;
+		this._toastText = null;
+		this._toastAnim = null;
+		this._toastShown = false;
+		this._toastTimer = 0;
+		this._tabWatch = null;
+		this._tabIdx = undefined;
+		this._warned = false;
+	}
+
+	get s() {
+		return this.plugin.settings;
+	}
+
+	// The separate Tab Arrows plugin does the same job. With both on, every tap would be handled twice (two tabs at once).
+	conflict() {
+		try {
+			const pl = this.app.plugins;
+			return !!(pl && pl.enabledPlugins && pl.enabledPlugins.has('tab-arrows'));
+		} catch (e) {
+			return false;
+		}
+	}
+
+	// On only when it was switched on, on a phone or tablet, once the workspace is up, while the plugin is loaded, and
+	// while the separate Tab Arrows plugin is not doing the same thing.
+	wanted() {
+		return !this.plugin._unloaded && this.isReady && Platform.isMobile && this.s.taOn === true && !this.conflict();
+	}
+
+	ready() {
+		this.isReady = true;
+		this.sync();
+	}
+
+	// Starts or stops to match the setting, or applies a changed sub-setting. Cheap when nothing changed.
+	sync() {
+		if (this.s.taOn === true && this.isReady && Platform.isMobile && this.conflict()) {
+			if (!this._warned) {
+				this._warned = true;
+				new Notice('Tab arrows: the separate Tab Arrows plugin is on. Turn it off, then switch this setting off and on again.', 9000);
+			}
+		} else {
+			this._warned = false;
+		}
+		if (!this.wanted()) {
+			this.stop();
+			return;
+		}
+		if (!this.on) {
+			this.start();
+			return;
+		}
+		if (!this.s.taPill) this.hideToast(true);
+		this.look();
+	}
+
+	say(msg) {
+		if (this.s.taDebug) new Notice('Tab arrows: ' + msg, 2500);
+	}
+
+	// ----- start / stop -----------------------------------------------------------------------------------------
+
+	start() {
+		if (this.on) return;
+		this.on = true;
+		const add = (target, type, fn, opts) => {
+			target.addEventListener(type, fn, opts);
+			this.offs.push(() => target.removeEventListener(type, fn, opts));
+		};
+		// Capture phase on the document: runs before Obsidian's own handlers on the buttons, which can then be kept from
+		// running. Only presses on the two arrows are touched.
+		const cap = { capture: true };
+		add(document, 'pointerdown', (e) => this.onDown(e), cap);
+		add(document, 'pointerup', (e) => this.onUp(e), cap);
+		add(document, 'pointercancel', () => (this._down = null), cap);
+		add(document, 'contextmenu', (e) => this.onContext(e), cap);
+		add(document, 'click', (e) => this.onClick(e), cap);
+		// Obsidian greys the arrows by history, and sets that again whenever the active note changes. After its own
+		// handlers have run, they are set again by tabs.
+		const ws = this.app.workspace;
+		this.refs.push([ws, ws.on('active-leaf-change', () => this.look())]);
+		this.refs.push([ws, ws.on('layout-change', () => this.look())]);
+		this.look();
+	}
+
+	stop() {
+		if (!this.on) return;
+		this.on = false;
+		for (const off of this.offs.splice(0)) off();
+		for (const [owner, ref] of this.refs.splice(0)) {
+			try {
+				owner.offref(ref);
+			} catch (e) {
+				/* already gone */
+			}
+		}
+		if (this._tabWatch) this._tabWatch.disconnect();
+		this._tabWatch = null;
+		this._down = null;
+		this._handled = null;
+		this.hideToast(true);
+		this.restoreTabButton();
+		this.release();
+	}
+
+	// ----- tabs -------------------------------------------------------------------------------------------------
+
+	// The tabs in the order of Obsidian's tab switcher (the same ones its tab count counts), and where you are.
+	tabs() {
+		const ws = this.app.workspace;
+		const leaves = [];
+		// Braces matter: Obsidian stops iterating when the callback returns a truthy value, and push() returns the length.
+		ws.iterateRootLeaves((l) => {
+			leaves.push(l);
+		});
+		let i = -1;
+		for (const cand of [ws.activeLeaf, ws.getMostRecentLeaf && ws.getMostRecentLeaf()]) {
+			if (cand && (i = leaves.indexOf(cand)) >= 0) break;
+		}
+		if (i < 0) i = leaves.findIndex((l) => l.containerEl && l.containerEl.offsetParent); // whichever tab is on screen
+		return { leaves, i };
+	}
+
+	go(dir) {
+		const { leaves, i } = this.tabs();
+		const j = taTargetIndex(leaves.length, i, dir, this.s.taWrap);
+		if (j < 0) {
+			this.toast(leaves.length < 2 ? 'Only one tab open' : 'No ' + (dir > 0 ? 'next' : 'previous') + ' tab', dir, true);
+			this.say(leaves.length < 2 ? 'only one tab open' : 'no ' + (dir > 0 ? 'next' : 'previous') + ' tab');
+			return false;
+		}
+		// Same call as Obsidian's own tab switcher. No "focus": that would put the cursor in the note, raise the keyboard
+		// and hide the bottom bar.
+		this.app.workspace.setActiveLeaf(leaves[j]);
+		this.toast('Tab ' + (j + 1) + ' of ' + leaves.length, dir);
+		this.say('tab ' + (j + 1) + ' of ' + leaves.length);
+		if (this.s.taBuzz && CAN_BUZZ) {
+			try {
+				navigator.vibrate(10);
+			} catch (err) {
+				/* no vibration on this device */
+			}
+		}
+		return true;
+	}
+
+	// ----- the pill ---------------------------------------------------------------------------------------------
+
+	// A small pill just above the bottom bar ("Tab 2 of 5"). One pill is reused: it rises in, a quick tap slides the new
+	// text in from the side the arrow points to, and it sinks away a moment after the last tap.
+	// `dir` is the arrow's direction (-1 / 1); `bad` marks a "nowhere to go" message, which nudges instead of sliding.
+	toast(text, dir, bad) {
+		if (!this.s.taPill) return;
+		let el = this._toast;
+		if (!el || !el.isConnected) {
+			el = this._toast = document.body.createDiv({ cls: 'nm-ta-pill' });
+			el.setAttribute('aria-hidden', 'true');
+			this._toastText = el.createSpan();
+			this._toastShown = false;
+		}
+		const nav = document.querySelector('.mobile-navbar');
+		const top = nav && nav.isConnected ? nav.getBoundingClientRect().top : window.innerHeight - 70;
+		el.style.bottom = Math.max(16, window.innerHeight - top + 14) + 'px';
+
+		const calm = this.plugin.reducedMotion() || typeof el.animate !== 'function';
+		const at = (x, y, sc) => 'translate(calc(-50% + ' + x + 'px), ' + y + 'px) scale(' + sc + ')';
+		const wasShown = this._toastShown;
+		const mid = wasShown && parseFloat(getComputedStyle(el).opacity) > 0.35; // still on screen, even if sinking away
+		if (this._toastAnim) this._toastAnim.cancel();
+		this._toastAnim = null;
+		window.clearTimeout(this._toastTimer);
+
+		this._toastText.textContent = text;
+		el.style.visibility = 'visible';
+		el.style.opacity = '1';
+		el.style.transform = 'translate(-50%,0)';
+		this._toastShown = true;
+
+		if (calm) {
+			if (!mid && typeof el.animate === 'function') el.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 120, easing: 'ease-out' });
+		} else if (!mid) {
+			// Rises from a little below, overshoots a touch, and settles.
+			this._toastAnim = el.animate(
+				[
+					{ opacity: 0, transform: at(0, 14, 0.9), offset: 0, easing: 'cubic-bezier(0.2, 0.9, 0.3, 1)' },
+					{ opacity: 1, transform: at(0, -2, 1.025), offset: 0.62, easing: 'ease-out' },
+					{ opacity: 1, transform: at(0, 0, 1), offset: 1 },
+				],
+				{ duration: 340 }
+			);
+		} else if (bad) {
+			this._toastAnim = el.animate(
+				[0, -5, 4, -3, 1.5, 0].map((n, k, a) => ({ transform: at(n, 0, 1), offset: k / (a.length - 1) })),
+				{ duration: 320, easing: 'ease-out' }
+			);
+		} else {
+			// Already up: a small press, and the new text slides in from the side the arrow points to.
+			this._toastAnim = el.animate(
+				[
+					{ transform: at(0, 0, 1), offset: 0, easing: 'ease-out' },
+					{ transform: at(0, 0, 1.06), offset: 0.35, easing: 'ease-in-out' },
+					{ transform: at(0, 0, 1), offset: 1 },
+				],
+				{ duration: 260 }
+			);
+			this._toastText.animate(
+				[
+					{ opacity: 0, transform: 'translateX(' + (dir || 1) * 14 + 'px)', filter: 'blur(2px)' },
+					{ opacity: 1, transform: 'translateX(0)', filter: 'blur(0)' },
+				],
+				{ duration: 240, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' }
+			);
+		}
+		this._toastTimer = window.setTimeout(() => this.hideToast(false), 1300);
+	}
+
+	hideToast(now) {
+		window.clearTimeout(this._toastTimer);
+		const el = this._toast;
+		if (!el) return;
+		if (this._toastAnim) this._toastAnim.cancel();
+		this._toastAnim = null;
+		if (now) {
+			el.remove();
+			this._toast = null;
+			this._toastShown = false;
+			return;
+		}
+		if (this.plugin.reducedMotion() || typeof el.animate !== 'function') {
+			el.style.opacity = '0';
+			el.style.visibility = 'hidden';
+			this._toastShown = false;
+			return;
+		}
+		const done = () => {
+			if (this._toastAnim !== anim) return; // shown again in the meantime
+			this._toastAnim = null;
+			this._toastShown = false;
+			el.style.opacity = '0';
+			el.style.visibility = 'hidden';
+			anim.cancel(); // the resting style above now says the same, so the held end frame is not needed
+		};
+		// Sinks a little and shrinks as it fades.
+		const anim = (this._toastAnim = el.animate(
+			[
+				{ opacity: 1, transform: 'translate(-50%, 0) scale(1)' },
+				{ opacity: 0, transform: 'translate(-50%, 8px) scale(0.96)' },
+			],
+			{ duration: 220, easing: 'cubic-bezier(0.4, 0, 1, 1)', fill: 'forwards' }
+		));
+		anim.onfinish = done;
+	}
+
+	// ----- taps -------------------------------------------------------------------------------------------------
+
+	actionOf(t) {
+		if (!(t instanceof Element)) return null;
+		const el = t.closest(TA_ACTION);
+		if (!el || !el.closest('.mobile-navbar')) return null;
+		return { el, dir: el.classList.contains('mobile-navbar-action-back') ? -1 : 1 };
+	}
+
+	onDown(e) {
+		const a = this.actionOf(e.target);
+		this._down = a ? { dir: a.dir, el: a.el, x: e.clientX, y: e.clientY, t: performance.now(), touch: e.pointerType !== 'mouse', held: false } : null;
+	}
+
+	// A touch hold: the system reports it as a context menu, and Obsidian opens its history list for it.
+	onContext(e) {
+		if (this._down && this.actionOf(e.target)) this._down.held = true;
+	}
+
+	// The tap is handled the moment the finger lifts, so it does not depend on the browser sending a click afterwards.
+	onUp(e) {
+		const d = this._down;
+		this._down = null;
+		if (!d) return;
+		const a = this.actionOf(e.target);
+		if (!a || a.el !== d.el) return; // lifted somewhere else
+		const moved = Math.hypot(e.clientX - d.x, e.clientY - d.y) > TA_SLOP;
+		const long = performance.now() - d.t >= (d.touch ? TA_TOUCH_HOLD : TA_MOUSE_HOLD);
+		this._handled = { dir: d.dir, t: performance.now() };
+		if (d.held || long || moved) return; // not a tap, and the click after it must not step history
+		this.go(d.dir);
+	}
+
+	// Every click on the two arrows is taken over, so Obsidian's own history step never runs by accident. A click that
+	// follows a tap already handled on pointer-up is just swallowed; one without (keyboard, no pointer events) is the tap.
+	onClick(e) {
+		const a = this.actionOf(e.target);
+		if (!a) return;
+		e.preventDefault();
+		e.stopImmediatePropagation();
+		const h = this._handled;
+		this._handled = null;
+		if (h && h.dir === a.dir && performance.now() - h.t < TA_CLICK_WINDOW) return;
+		this.go(a.dir);
+	}
+
+	// ----- how the arrows look ----------------------------------------------------------------------------------
+
+	buttons() {
+		const nb = this.app.mobileNavbar;
+		const nav = (nb && nb.containerEl) || document.querySelector('.mobile-navbar');
+		if (!nav) return null;
+		const back = nav.querySelector(TA_BACK);
+		const fwd = nav.querySelector(TA_FORWARD);
+		return back && fwd ? { back, fwd } : null;
+	}
+
+	// Greyed out when there is no tab that way; labelled for what they now do.
+	refresh() {
+		if (!this.on) return;
+		const b = this.buttons();
+		if (!b) return;
+		if (!this._saved) this._saved = { back: b.back.getAttribute('aria-label'), fwd: b.fwd.getAttribute('aria-label') };
+		const { leaves, i } = this.tabs();
+		const set = (el, attr, v) => {
+			if (el.getAttribute(attr) !== v) el.setAttribute(attr, v); // only when it differs, so it cannot set itself off
+		};
+		set(b.back, 'aria-disabled', String(taTargetIndex(leaves.length, i, -1, this.s.taWrap) < 0));
+		set(b.fwd, 'aria-disabled', String(taTargetIndex(leaves.length, i, 1, this.s.taWrap) < 0));
+		set(b.back, 'aria-label', 'Previous tab');
+		set(b.fwd, 'aria-label', 'Next tab');
+	}
+
+	// The bottom bar may not exist yet at start-up, or be rebuilt later: hook up whatever is still missing, then redraw.
+	look() {
+		if (!this.on) return;
+		this.watchButtons();
+		this.watchTabButton();
+		this.refresh();
+		this.refreshTabButton();
+	}
+
+	// ----- the tab button (the box with the tab count in the bottom bar) ----------------------------------------
+
+	tabNumberEl() {
+		const nb = this.app.mobileNavbar;
+		return (nb && nb.tabButtonEl) || document.querySelector('.mobile-navbar-tabs-number');
+	}
+
+	// While the pop-up pill is on it already says which tab you are on, so the tab button shows a plain tabs icon
+	// (no number) and the "Tab button" setting is not used. With the pill off, the chosen setting applies.
+	tabButtonMode() {
+		return this.s.taPill ? 'icon' : this.s.taTabButton;
+	}
+
+	// What the tab button shows for tab `i` of `count`.
+	tabButtonView(mode, i, count) {
+		const n = i + 1;
+		if (mode === 'icon') return { sig: 'icon', icon: true };
+		if (mode === 'current') return { sig: 'c' + n, text: String(n) };
+		if (mode === 'fraction') return { sig: 'f' + n + '/' + count, text: n + '/' + count, small: true };
+		return null;
+	}
+
+	refreshTabButton() {
+		if (!this.on) return;
+		const el = this.tabNumberEl();
+		if (!el) return;
+		const mode = this.tabButtonMode();
+		const { leaves, i } = this.tabs();
+		if (!leaves.length || (i < 0 && mode !== 'icon')) return;
+		const v = this.tabButtonView(mode, i, leaves.length);
+		if (!v) return this.restoreTabButton();
+		// Already showing exactly this? (Obsidian writing its own number over it makes this false.)
+		const intact = v.icon
+			? el.dataset.taSig === v.sig && el.firstElementChild && el.firstElementChild.dataset.ta === '2'
+			: el.dataset.taSig === v.sig && !el.firstElementChild && el.textContent === v.text;
+		if (intact) return;
+		const changed = this._tabIdx !== undefined && this._tabIdx !== i;
+		this._tabIdx = i;
+		el.dataset.taSig = v.sig;
+		el.textContent = '';
+		el.style.fontSize = v.small ? 'calc(var(--icon-size) * 0.42)' : '';
+		if (v.icon) {
+			// A small browser-tab glyph: a page with a tab on its top-left corner. Drawn inline, so it takes the text colour.
+			const NS = 'http://www.w3.org/2000/svg';
+			const svg = document.createElementNS(NS, 'svg');
+			svg.dataset.ta = '2';
+			svg.setAttribute('viewBox', '0 0 24 24');
+			svg.setAttribute('fill', 'none');
+			svg.setAttribute('stroke', 'currentColor');
+			svg.setAttribute('stroke-width', '2.2');
+			svg.setAttribute('stroke-linecap', 'round');
+			svg.setAttribute('stroke-linejoin', 'round');
+			svg.setAttribute('aria-hidden', 'true');
+			svg.style.cssText = 'display:block;width:calc(var(--icon-size, 24px) * 0.56);height:calc(var(--icon-size, 24px) * 0.56);';
+			for (const [tag, attrs] of [
+				['rect', { x: 3, y: 8, width: 18, height: 12, rx: 2.5 }],
+				['path', { d: 'M3 8V6.5A2.5 2.5 0 0 1 5.5 4H9a2 2 0 0 1 2 2v2' }],
+			]) {
+				const part = document.createElementNS(NS, tag);
+				for (const k in attrs) part.setAttribute(k, String(attrs[k]));
+				svg.appendChild(part);
+			}
+			el.appendChild(svg);
+		} else {
+			el.textContent = v.text;
+		}
+		if (changed && !v.icon && !this.plugin.reducedMotion() && typeof el.animate === 'function') {
+			// The new value drops in from just below and settles.
+			el.animate([{ opacity: 0, transform: 'translateY(5px) scale(0.8)' }], { duration: 200, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' });
+		}
+	}
+
+	// Gives the tab button back to Obsidian, which shows the number of tabs.
+	restoreTabButton() {
+		const el = this.tabNumberEl();
+		if (!el || !el.dataset.taSig) return;
+		delete el.dataset.taSig;
+		el.style.fontSize = '';
+		let n = 0;
+		this.app.workspace.iterateRootLeaves(() => {
+			n++;
+		});
+		el.textContent = String(n);
+		this._tabIdx = undefined;
+	}
+
+	// Obsidian can set the greyed look again at any time (it does when the active note changes); this puts it right.
+	watchButtons() {
+		const b = this.buttons();
+		if (!b || this._watch) return;
+		this._watch = new MutationObserver(() => this.refresh());
+		this._watch.observe(b.back, { attributes: true, attributeFilter: ['aria-disabled'] });
+		this._watch.observe(b.fwd, { attributes: true, attributeFilter: ['aria-disabled'] });
+	}
+
+	// Obsidian writes its own tab count into the tab button whenever the layout changes; this writes ours back over it.
+	watchTabButton() {
+		const el = this.tabNumberEl();
+		if (!el || this._tabWatch) return;
+		this._tabWatch = new MutationObserver(() => this.refreshTabButton());
+		this._tabWatch.observe(el, { childList: true, characterData: true, subtree: true });
+	}
+
+	// Gives the arrows back to Obsidian: its own look (by history) and its own labels.
+	release() {
+		if (this._watch) this._watch.disconnect();
+		this._watch = null;
+		const b = this.buttons();
+		const nb = this.app.mobileNavbar;
+		if (b && this._saved) {
+			for (const [el, v] of [
+				[b.back, this._saved.back],
+				[b.fwd, this._saved.fwd],
+			]) {
+				if (v === null) el.removeAttribute('aria-label');
+				else el.setAttribute('aria-label', v);
+			}
+		}
+		this._saved = null;
+		try {
+			if (nb && typeof nb.onLeafChange === 'function') nb.onLeafChange(); // sets the look by history again
+		} catch (err) {
+			/* the arrows are fixed by the next change of note */
+		}
+	}
+}
+
 class NoteMinimapPlugin extends Plugin {
 	// Adds or removes the style tag that hides Obsidian's native scrollbar, following the setting.
 	applyNativeScrollbar() {
@@ -1490,10 +2190,10 @@ class NoteMinimapPlugin extends Plugin {
 		delete this.settings.pageIndicator; // removed feature: clear the leftover key
 		delete this.settings.fullscreen; // removed feature: clear the leftover key
 		delete this.settings.doubleTapHeading; // removed feature: clear the leftover key
-		// The bubble's 'words' and 'heading' styles were removed: anyone on one of them gets the page number.
-		if (this.settings.pageShows !== 'percent') this.settings.pageShows = 'page';
+		// The bubble's 'words', 'heading' and 'percent' styles were removed: the bubble always shows the page number, and the buzz counts pages.
+		delete this.settings.pageShows; // removed setting: clear the leftover key
+		delete this.settings.pageHapticsBy; // removed setting: clear the leftover key
 		if (this.settings.trackIdle !== 'stay') this.settings.trackIdle = 'fade';
-		if (!['bubble', 'page', 'percent'].includes(this.settings.pageHapticsBy)) this.settings.pageHapticsBy = 'bubble';
 		if (this.settings.arrowTap !== 'heading') this.settings.arrowTap = 'step';
 		// v12: the arrow buttons are taller (36 -> 52 px), so a single tap lands easily. The old default becomes the
 		// new one; any other size you chose is kept.
@@ -1505,6 +2205,12 @@ class NoteMinimapPlugin extends Plugin {
 			if (saved.height === 60) this.settings.height = DEFAULTS.height;
 		}
 		// Full Screen Guard (experimental): off unless it was switched on, and every value kept inside its range.
+		this.settings.taOn = this.settings.taOn === true;
+		this.settings.taWrap = this.settings.taWrap !== false;
+		this.settings.taPill = this.settings.taPill !== false;
+		if (this.settings.taTabButton !== 'fraction') this.settings.taTabButton = 'current';
+		this.settings.taBuzz = this.settings.taBuzz === true;
+		this.settings.taDebug = this.settings.taDebug === true;
 		this.settings.fsgEnabled = this.settings.fsgEnabled === true;
 		this.settings.fsgForce = this.settings.fsgForce !== false;
 		this.settings.fsgKeepAuto = this.settings.fsgKeepAuto !== false;
@@ -1530,6 +2236,20 @@ class NoteMinimapPlugin extends Plugin {
 		// Page bookmarks: long-press the search button. Nothing is listening while the setting is off.
 		this.bookmarks = new PageBookmarks(this);
 		this.app.workspace.onLayoutReady(() => this.bookmarks.ready());
+
+		// The window's height with no keyboard in it, for the pop-ups that move up out of the keyboard's way (KeyboardLift).
+		if (Platform.isMobile) {
+			kbRememberView();
+			this.registerDomEvent(window, 'resize', kbRememberView);
+			this.registerDomEvent(window, 'orientationchange', () => {
+				KB_VIEW.full = 0; // forget it; it is read again once the turn has settled
+				window.setTimeout(kbRememberView, 450);
+			});
+		}
+
+		// Tab arrows: the bottom bar's arrows switch tabs. Nothing is listening while the setting is off (it is off by default).
+		this.tabArrows = new TabArrows(this);
+		this.app.workspace.onLayoutReady(() => this.tabArrows.ready());
 		this.addCommand({
 			id: 'bookmark-this-page',
 			name: 'Bookmark this page',
@@ -1982,6 +2702,7 @@ class NoteMinimapPlugin extends Plugin {
 		this._guardT = null;
 		if (this.guard) this.guard.stop();
 		if (this.bookmarks) this.bookmarks.stop();
+		if (this.tabArrows) this.tabArrows.stop();
 		this.applyNativeScrollbar();
 		this.removeStartHook();
 		for (const st of this.states.values()) this.ungateRender(st, true);
@@ -3097,6 +3818,7 @@ class NoteMinimapPlugin extends Plugin {
 
 	async saveSettings() {
 		if (this.bookmarks) this.bookmarks.sync();
+		if (this.tabArrows) this.tabArrows.sync();
 		if (this.guard) this.guard.syncSoon(); // Full Screen Guard: start or stop at once, apply a changed value after a pause (nothing while it is off)
 		if (this.settings.animateBars && this._barsCls) this.applyBarsLook(); // speed / style of the bars' slide (also after a reset)
 		this.queueFrameRefresh();
@@ -5106,12 +5828,6 @@ class NoteMinimapPlugin extends Plugin {
 		return cm.state.doc.lineAt(blk.from).number - 1;
 	}
 
-	// What the buzz counts: the same as the bubble unless Page vibration has its own choice.
-	hapMode() {
-		const by = this.settings.pageHapticsBy || 'bubble';
-		return by === 'bubble' ? this.settings.pageShows || 'page' : by;
-	}
-
 	pageInfo(st) {
 		// The page bubble, the buzz and the first show all ask in the same tick, about the same scroll position:
 		// work it out once (pageTick clears this at the start of every tick).
@@ -5140,10 +5856,6 @@ class NoteMinimapPlugin extends Plugin {
 			let page = Math.floor(cum[line] / per) + 1;
 			if (atEnd) page = total; // the very end is the last page
 			const info = { page: Math.max(1, Math.min(total, page)), total };
-			const cfg = this.settings;
-			if ((cfg.pageBubble !== false && cfg.pageShows === 'percent') || (cfg.pageHaptics !== false && this.hapMode() === 'percent')) {
-				info.pct = atEnd ? 100 : Math.max(0, Math.min(100, Math.round((cum[line] / Math.max(1, total0)) * 100)));
-			}
 			return info;
 		} catch (err) {
 			return null;
@@ -5191,20 +5903,17 @@ class NoteMinimapPlugin extends Plugin {
 		if (bub && st.pageOn) this.pageMove(st, vpTop, vpH, now, false);
 	}
 
-	// A short buzz each time the scroll crosses into another page (or, when the bubble shows percent, each time the
-	// percent changes). After a pause the first move only notes where you are, so starting to scroll never buzzes by itself.
+	// A short buzz each time the scroll crosses into another page. After a pause the first move only notes where you are,
+	// so starting to scroll never buzzes by itself.
 	pageBuzz(st, now, rested) {
 		if (rested) st.hapPage = null;
 		if (now - (st.hapT || 0) < 70) return;
 		st.hapT = now;
 		const info = this.pageInfo(st);
 		if (!info) return;
-		// What is being counted: whole percents in percent mode, pages otherwise. The prefix tells the two apart,
-		// so switching the setting just starts counting again instead of buzzing once.
-		const hm = this.hapMode();
-		const key = hm === 'percent' && info.pct !== undefined ? 'p' + info.pct : 'n' + info.page;
+		const key = 'n' + info.page;
 		const prev = st.hapPage;
-		if (typeof prev === 'string' && prev.charAt(0) === key.charAt(0) && prev !== key) {
+		if (typeof prev === 'string' && prev !== key) {
 			try {
 				navigator.vibrate(12);
 			} catch (e) {
@@ -5388,14 +6097,8 @@ class NoteMinimapPlugin extends Plugin {
 	}
 
 	pageSet(st, info, animate) {
-		const mode = this.settings.pageShows || 'page';
-		let t;
-		let sub = '';
-		if (mode === 'percent' && info.pct !== undefined) t = info.pct + '%';
-		else {
-			t = String(info.page);
-			sub = 'of ' + info.total;
-		}
+		const t = String(info.page);
+		const sub = 'of ' + info.total;
 		const changed = st.pageTxt !== t;
 		if (changed) {
 			st.pageTxt = t;
@@ -6152,19 +6855,6 @@ class MinimapSettingTab extends PluginSettingTab {
 			);
 		containerEl.insertBefore(pageWrap, null); // keeps the row right under the toggle
 
-		new Setting(pageInner)
-			.setName('Bubble shows')
-			.setDesc('What the bubble says. Page number: 3 of 12. Percent read: how far through the note you are.')
-			.addDropdown((d) =>
-				d
-					.addOption('page', 'Page number')
-					.addOption('percent', 'Percent read')
-					.setValue(p.settings.pageShows || 'page')
-					.onChange(async (v) => {
-						p.settings.pageShows = v;
-						await p.saveSettings();
-					})
-			);
 		slider('Page length', 'How much text is one page, in characters. Counted in the text, so rotating or unfolding never changes it.', 'pageLen', 600, 4000, 100, undefined, pageInner);
 
 		if (Platform.isMobile) {
@@ -6174,24 +6864,8 @@ class MinimapSettingTab extends PluginSettingTab {
 				.addToggle((t) =>
 					t.setValue(p.settings.pageHaptics !== false).onChange(async (v) => {
 						p.settings.pageHaptics = v;
-						this.setFold(hapFold.wrap, v);
 						await p.saveSettings();
 					})
-				);
-			const hapFold = fold(p.settings.pageHaptics !== false);
-			new Setting(hapFold.inner)
-				.setName('Buzz on')
-				.setDesc('What the buzz counts. Each page: a buzz for every new page. Each percent: a buzz for every new percent.')
-				.addDropdown((d) =>
-					d
-						.addOption('bubble', 'Same as the bubble')
-						.addOption('page', 'Each page')
-						.addOption('percent', 'Each percent')
-						.setValue(p.settings.pageHapticsBy || 'bubble')
-						.onChange(async (v) => {
-							p.settings.pageHapticsBy = v;
-							await p.saveSettings();
-						})
 				);
 		}
 
@@ -6474,6 +7148,91 @@ class MinimapSettingTab extends PluginSettingTab {
 						})
 				);
 			slider('Bar animation speed', 'How long the bars take to move, in milliseconds. Lower is quicker.', 'barsMs', 150, 900, 10, () => p.applyBarsLook(), barsFold.inner);
+		}
+
+		// ---- Tab arrows (merged from the Tab Arrows plugin) ----
+		// Off by default. The rows sit in a fold, so they open and close with the same motion as the other groups.
+		host = containerEl;
+		new Setting(containerEl).setName('Tab arrows').setHeading();
+		const taOn = p.settings.taOn === true;
+		new Setting(containerEl)
+			.setName('Arrows switch tabs')
+			.setDesc("Off by default. Phone and tablet app only. The left and right arrows in the bottom bar go to the previous and next tab, in the same order as Obsidian's tab switcher. Holding an arrow still opens the history list. Turning it off gives the arrows back to Obsidian.")
+			.addToggle((t) =>
+				t.setValue(taOn).onChange(async (v) => {
+					p.settings.taOn = v;
+					this.setFold(taFold.wrap, v);
+					await p.saveSettings();
+				})
+			);
+		const taFold = fold(taOn);
+		{
+			if (!Platform.isMobile) {
+				taFold.inner.createEl('p', {
+					cls: 'setting-item-description',
+					text: 'The bottom bar with these arrows is only in the mobile app, so nothing here does anything on this device.',
+				});
+			}
+			if (p.tabArrows && p.tabArrows.conflict()) {
+				taFold.inner.createEl('p', {
+					cls: 'setting-item-description',
+					text: 'The separate Tab Arrows plugin is turned on. Turn it off first: with both on, every tap would be handled twice.',
+				});
+			}
+			new Setting(taFold.inner)
+				.setName('Wrap around')
+				.setDesc('From the last tab, the right arrow goes to the first, and the left arrow from the first goes to the last. Off: the arrow at either end is greyed out.')
+				.addToggle((t) =>
+					t.setValue(p.settings.taWrap !== false).onChange(async (v) => {
+						p.settings.taWrap = v;
+						await p.saveSettings();
+					})
+				);
+			new Setting(taFold.inner)
+				.setName('Pop-up pill')
+				.setDesc('A small pill above the bottom bar says which tab you moved to, for example "Tab 2 of 5". While it is on, the tab button in the bottom bar shows a tabs icon instead of a number.')
+				.addToggle((t) =>
+					t.setValue(p.settings.taPill !== false).onChange(async (v) => {
+						p.settings.taPill = v;
+						this.setFold(taBtnFold.wrap, !v);
+						await p.saveSettings();
+					})
+				);
+			// With the pill on, the tab button is the number-free icon, so there is nothing to choose.
+			host = taFold.inner;
+			const taBtnFold = fold(p.settings.taPill === false);
+			host = containerEl;
+			new Setting(taBtnFold.inner)
+				.setName('Tab button')
+				.setDesc('What the box in the bottom bar shows. Obsidian shows how many tabs are open; these show which one you are on. Only available while the pop-up pill is off.')
+				.addDropdown((d) =>
+					d
+						.addOption('current', 'Current tab number')
+						.addOption('fraction', 'Current of total (2/5)')
+						.setValue(p.settings.taTabButton)
+						.onChange(async (v) => {
+							p.settings.taTabButton = v;
+							await p.saveSettings();
+						})
+				);
+			new Setting(taFold.inner)
+				.setName('Buzz when switching')
+				.setDesc('A tiny buzz when the tab changes.')
+				.addToggle((t) =>
+					t.setValue(p.settings.taBuzz === true).onChange(async (v) => {
+						p.settings.taBuzz = v;
+						await p.saveSettings();
+					})
+				);
+			new Setting(taFold.inner)
+				.setName('Show a notice on every tap')
+				.setDesc('For troubleshooting: shows which tab you moved to, or why nothing happened.')
+				.addToggle((t) =>
+					t.setValue(p.settings.taDebug === true).onChange(async (v) => {
+						p.settings.taDebug = v;
+						await p.saveSettings();
+					})
+				);
 		}
 
 		new Setting(containerEl).setName('Performance').setHeading();
@@ -7225,6 +7984,7 @@ class MinimapSettingTab extends PluginSettingTab {
 NoteMinimapPlugin.classify = (text) => classify(text, 0).items;
 NoteMinimapPlugin.FullScreenGuard = FullScreenGuard;
 NoteMinimapPlugin.PageBookmarks = PageBookmarks;
+NoteMinimapPlugin.TabArrows = TabArrows;
 module.exports = NoteMinimapPlugin;
 
 /* nosourcemap */

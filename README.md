@@ -7,8 +7,9 @@ An [Obsidian](https://obsidian.md) plugin that adds a scrollbar or a colour-code
 - **Two styles.** *Scrollbar* is a thin, smooth bar. *Minimap* is a small coloured picture of your whole note, with a band showing where you are. Pick one under **Style**.
 - **Drag or tap to jump** anywhere in a long note.
 - **Arrow buttons** (scrollbar style): tap to jump to the next or previous heading, hold to keep scrolling.
-- **Page bubble:** while you scroll, a small bubble shows where you are, like *3 of 12* or a percent.
+- **Page bubble:** while you scroll, a small bubble shows the page you are on, like *3 of 12*.
 - **Page vibration** on phones: a light buzz as you cross into a new page.
+- **Tab arrows** (new in 6.5.0, off by default): the bottom bar's left and right arrows switch to the previous and next tab.
 - **Page bookmarks** (new in 6.4.4): long-press the search button to bookmark the page you are on and to open all your bookmarks, across every note and tab.
 - **Easy to restyle:** bar colour, width, shape, opacity, glow, and which side it sits on. The bar width adapts to your screen by default.
 - **Smooth motion:** the bubble and the bar's track fade in and out together, and the top and bottom bars can slide away while you scroll.
@@ -38,11 +39,12 @@ Open **Settings → My Note Minimap [Scrollbar]**. Every slider has − and + bu
 | --- | --- |
 | **Updates** | Optional update check (off by default) and a button to check now. |
 | **Controls** | Touch on/off, **Hide Obsidian scrollbar**, hide the bar, show the hand button in the header. |
-| **Look** | **Style**, **Side**, the page bubble (what it shows, page length), page vibration, **Page bookmarks**. |
+| **Look** | **Style**, **Side**, the page bubble (page length), page vibration, **Page bookmarks**. |
 | **Scrollbar look** | Bar width (automatic by default), shape, colour, opacity, **Show track**, **Track when idle**, glow. |
 | **Margins and arrows** | Top, bottom and edge margins (automatic per device), touch area, arrow buttons, arrow size, what a tap does, step size, hold speed. |
 | **Minimap only** | Fast rendering, width, margins, top offset, height. |
 | **Scrolling** | Smooth scrolling and glide length, ignore small finger movements, screen refresh rate, animate the top and bottom bars. |
+| **Tab arrows** | **Arrows switch tabs** (off by default), wrap around, pop-up pill, tab button, buzz when switching, notice on every tap. |
 | **Performance** | Get ready at start-up, faster loading, hold back jumps, scroll diagnostics. |
 | **Other** | Hide on mobile, and files or folders to exclude. |
 | **Experimental** | Full Screen Guard (off by default): force full screen, keep Auto full screen on, camera position, space to keep clear, and what Android reports. |
@@ -65,6 +67,18 @@ Commands in the command palette: **Check for updates**, and an empty **Do nothin
 
 While it is off nothing runs. Turning it off puts everything back: the status bar returns and the extra space is removed. Limits: the bottom navigation bar cannot be hidden by a plugin, and a black strip at the top can only be changed in Android's own display settings for the app. If you still have the separate *Full Screen Guard* plugin, disable it, since both would do the same job.
 
+## Tab arrows
+
+**Off by default.** Phone and tablet app only. It was a separate plugin (Tab Arrows 2.0.0) and is now built in. Turn it on under **Settings → My Note Minimap → Tab arrows**; its rows open below the switch.
+
+- **Arrows switch tabs.** The left and right arrows in the bottom bar go to the previous and next tab, in the order of Obsidian's tab switcher. Holding an arrow still opens the history list.
+- **Wrap around** (on): from the last tab the right arrow goes to the first, and the other way round. Off: the arrow at either end is greyed out.
+- **Pop-up pill** (on): a small pill above the bottom bar says which tab you moved to, like *Tab 2 of 5*, with the same rise, press and sink animations as before. While it is on, the tab button shows a tabs icon instead of a number.
+- **Tab button** (only with the pill off): the box in the bar shows the current tab number, or *2/5*.
+- **Buzz when switching** (off) and **Show a notice on every tap** (off, for troubleshooting).
+
+It patches none of Obsidian's code. Turning it off (or the plugin off) gives the arrows, their labels and the tab button back to Obsidian exactly as they were, and nothing listens. If the separate *Tab Arrows* plugin is still on, disable it: with both on, each tap would be handled twice.
+
 ## Page bookmarks
 
 **Settings → My Note Minimap → Page bookmarks** (on by default; turn it off and the search button works exactly as Obsidian made it, with nothing listening at all).
@@ -78,6 +92,7 @@ A normal tap on the search button still opens Obsidian's quick switcher; only a 
 
 - **Across tabs and notes.** A bookmark belongs to a note, not to a tab. Tapping one switches to the tab that already has that note open, or opens the note in the current tab, and moves to the bookmarked place. Bookmarks follow a note (or folder) when it is renamed or moved and are removed when it is deleted.
 - **How the place is kept.** As the note's scroll position (a line number, the one Obsidian uses to jump to a heading), with the page and page count it had when saved, so rotating the phone does not move it. A large note that is still laying itself out when it opens is checked a few times and put back, until you touch the screen.
+- **Keyboard.** The name box (and the filter box) moves up out of the way of the on-screen keyboard on any device: it reads the keyboard from Obsidian's keyboard events, its keyboard height and the visual viewport, lifts only as much as needed, shortens itself if it is taller than the free space, and glides back when the keyboard goes.
 - **Commands** for the command palette (and desktop, which has no bottom bar): *Bookmark this page* and *Show page bookmarks*.
 - **Editing a note moves lines.** The place is a line number, so text added or removed above a bookmark moves where it lands, by about as many lines as were added or removed.
 
@@ -103,6 +118,7 @@ Nothing is sent about you or your notes. No analytics, no telemetry.
 
 Recent versions in short. Older notes are at the bottom.
 
+- **6.5.0:** New **Tab arrows** setting (off by default): Tab Arrows 2.0.0 merged in, with all its options and animations. The bookmark name box (and the bookmark list's filter box) now moves up out of the way of the on-screen keyboard automatically, on any device. The page bubble now always shows the page number: **Bubble shows**, the percent option and **Buzz on** are removed (page vibration buzzes on each new page); old saved values are cleared.
 - **6.4.5:** Fixes the bottom bar glitching after a bookmark jump and when coming back to a note from the sidebar. While a bookmark is put in place, Obsidian no longer takes the note's own scrolling for yours, so the bars stop hiding and showing; and the bar's slide no longer runs on top of Obsidian's own sideways slide of the bar with the sidebar, so it no longer waits at the screen edge and jumps.
 - **6.4.4:** New **Page bookmarks**: long-press the search button to bookmark the current page (named *Page 23* by default, renamable) and to open the list of all bookmarks across every note and tab; tap one to go there. A setting turns it on or off; with it off nothing listens. Commands *Bookmark this page* and *Show page bookmarks*.
 - **6.4.3:** Full Screen Guard's slider and plus/minus buttons no longer stutter. A changed value is now applied once you pause (at most 0.9 s into a long drag) instead of on every step, and the "What Android reports" line is redrawn once after the last step. Switching the Guard on or off is still immediate.
