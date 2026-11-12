@@ -9,6 +9,7 @@ An [Obsidian](https://obsidian.md) plugin that adds a scrollbar or a colour-code
 - **Arrow buttons** (scrollbar style): tap to jump to the next or previous heading, hold to keep scrolling.
 - **Page bubble:** while you scroll, a small bubble shows the page you are on, like *3 of 12*.
 - **Page vibration** on phones: a light buzz as you cross into a new page.
+- **Search button opens Find** (new in 6.5.1, off by default): a tap on the bottom bar's search button opens Find in the note instead of the quick switcher.
 - **Tab arrows** (new in 6.5.0, off by default): the bottom bar's left and right arrows switch to the previous and next tab.
 - **Page bookmarks** (new in 6.4.4): long-press the search button to bookmark the page you are on and to open all your bookmarks, across every note and tab.
 - **Easy to restyle:** bar colour, width, shape, opacity, glow, and which side it sits on. The bar width adapts to your screen by default.
@@ -67,6 +68,12 @@ Commands in the command palette: **Check for updates**, and an empty **Do nothin
 
 While it is off nothing runs. Turning it off puts everything back: the status bar returns and the extra space is removed. Limits: the bottom navigation bar cannot be hidden by a plugin, and a black strip at the top can only be changed in Android's own display settings for the app. If you still have the separate *Full Screen Guard* plugin, disable it, since both would do the same job.
 
+## Search button opens Find
+
+**Off by default.** Phone and tablet app only. Turn it on under **Settings → My Note Minimap → Search button opens Find** (next to the bookmark settings).
+
+A quick tap on the search button in the bottom bar opens **Find** in the note you are reading, the same Find bar as Menu → Find…, instead of the quick switcher. Only a tap does this: holding the button still opens the bookmark menu when **Page bookmarks** is on, and when it is off, holding goes to the quick switcher, so the quick switcher is never out of reach. With no note open (a graph, settings, an empty tab) the button works as Obsidian made it. It works in editing and reading view. Turning it off gives the button back to Obsidian; nothing listens while it is off.
+
 ## Tab arrows
 
 **Off by default.** Phone and tablet app only. It was a separate plugin (Tab Arrows 2.0.0) and is now built in. Turn it on under **Settings → My Note Minimap → Tab arrows**; its rows open below the switch.
@@ -100,6 +107,7 @@ A normal tap on the search button still opens Obsidian's quick switcher; only a 
 
 - **Speed.** The minimap is drawn on one canvas, only the part you can see is painted, and it redraws only when something changed, so long notes cost no more than short ones. If a very long or heavy note still stutters on an older phone, switch to the scrollbar style. Leave **Fast rendering** on.
 - **Screen refresh rate.** Arrow scrolling is timed to your screen. On a phone the plugin asks once (60, 90, 120 or 144 Hz) and can measure it for you. *Automatic* is fine if you are unsure.
+- **Find bar.** While Obsidian's Find bar is open (Menu → Find…, or the search button with *Search button opens Find* on), the scrollbar or minimap, its arrows and the page bubble start just below it and are shorter by the same amount, so they never sit on top of the bar; they go back when Find closes. It follows the bar's real height, including the Replace row, on any device.
 - **Colours** come from your current theme and follow light and dark mode.
 - **First run on a phone or tablet:** after the refresh-rate pop-up the plugin turns off Obsidian's pull-down Quick Action so pulling down from the top no longer opens a menu. On Obsidian 1.15 and newer this is the real *Disabled* setting; on older versions it is set to the plugin's empty command. You can change it back under Settings → Interface (older versions: Settings → Mobile).
 - **Reduced motion:** if your system asks for less motion, the animations are skipped.
@@ -118,6 +126,8 @@ Nothing is sent about you or your notes. No analytics, no telemetry.
 
 Recent versions in short. Older notes are at the bottom.
 
+- **6.5.2:** The scrollbar (or minimap), its arrows and the page bubble now stay clear of Obsidian's Find bar. While Find is open the strip starts just below the bar and is that much shorter, following the bar's real height (the Replace row makes it taller), and goes back when Find closes. It is measured from the bar itself, so it works the same on any phone, tablet or desktop.
+- **6.5.1:** New **Search button opens Find** setting (off by default): a tap on the search button opens Find in the note; holding still opens the bookmark menu or the quick switcher.
 - **6.5.0:** New **Tab arrows** setting (off by default): Tab Arrows 2.0.0 merged in, with all its options and animations. The bookmark name box (and the bookmark list's filter box) now moves up out of the way of the on-screen keyboard automatically, on any device. The page bubble now always shows the page number: **Bubble shows**, the percent option and **Buzz on** are removed (page vibration buzzes on each new page); old saved values are cleared.
 - **6.4.5:** Fixes the bottom bar glitching after a bookmark jump and when coming back to a note from the sidebar. While a bookmark is put in place, Obsidian no longer takes the note's own scrolling for yours, so the bars stop hiding and showing; and the bar's slide no longer runs on top of Obsidian's own sideways slide of the bar with the sidebar, so it no longer waits at the screen edge and jumps.
 - **6.4.4:** New **Page bookmarks**: long-press the search button to bookmark the current page (named *Page 23* by default, renamable) and to open the list of all bookmarks across every note and tab; tap one to go there. A setting turns it on or off; with it off nothing listens. Commands *Bookmark this page* and *Show page bookmarks*.

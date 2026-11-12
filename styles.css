@@ -43,6 +43,18 @@
 	left: auto;
 	right: var(--nm-edge, 0px);
 }
+/* While Obsidian's Find bar is open, the strip starts below it (see syncFind): --nm-find is how far down it is moved. The strip is
+   shorter by the same amount, so its bottom end stays where it was. The minimap with its automatic height is anchored at
+   the bottom, so for it moving the top is enough. */
+.note-minimap.nm-find {
+	top: calc(var(--nm-top, 5%) + var(--nm-find, 0px));
+}
+
+.note-minimap.nm-find.nm-scrollbar,
+.note-minimap.nm-find.nm-sized {
+	height: calc(var(--nm-height, 60%) - var(--nm-find, 0px));
+}
+
 /* The minimap stretches between the header and the bottom bar (the scrollbar sizes itself instead). */
 .note-minimap:not(.nm-scrollbar) {
 	bottom: var(--nm-bottom, auto);

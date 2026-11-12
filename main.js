@@ -28,7 +28,7 @@ const UPDATE_EVERY_MS = 24 * 60 * 60 * 1000; // the automatic check runs at most
 // The version of this code. It travels inside main.js, so it is always the version that is actually running (Obsidian
 // only reads manifest.json at start-up, and reading it from disk ourselves caused a hitch). Keep it equal to the
 // version in manifest.json; the release workflow refuses to publish if they differ.
-const PLUGIN_VERSION = '6.5.0';
+const PLUGIN_VERSION = '6.5.2';
 
 // 1 if version a is newer than b, -1 if older, 0 if the same ("1.2.3" style, a leading "v" is ignored).
 function cmpVer(a, b) {
@@ -96,6 +96,7 @@ const DEFAULTS = {
 	dragSlop: 6, // px: while a finger or pointer is held on the strip, movement smaller than this is ignored (0 = off)
 	exclusions: [],
 	// EXPERIMENTAL: Full Screen Guard (see FullScreenGuard). Off unless switched on under Settings > Experimental.
+	searchFind: false, // a tap on the search button opens Find in the note (long press is unchanged). Off by default
 	taOn: false, // Tab arrows (the old Tab Arrows plugin): the bottom bar's left and right arrows switch tabs. Off by default
 	taWrap: true, // from the last tab, "next" goes to the first (and the other way round)
 	taPill: true, // a small pill above the bottom bar saying which tab you are on; while on, the tab button shows a tabs icon
@@ -1246,6 +1247,114 @@ class BookmarksModal extends Modal {
 	}
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Search button opens Find (off by default)
+//
+// With this on, a quick tap on the search button in the phone bottom bar opens Find in the note you are reading
+// (Obsidian's own "Search in the current note" command, the same bar as Menu > Find...) instead of the quick switcher.
+// Only a tap: holding the button still does what it did (the bookmark menu when Page bookmarks is on), so nothing is lost.
+// When there is no note to search in (a graph, settings, an empty tab), the tap goes to Obsidian untouched.
+// Nothing is listening while the setting is off.
+// ---------------------------------------------------------------------------------------------------------------
+function searchButtonOf(el) {
+	const a = el && el.closest ? el.closest('.mobile-navbar-action') : null;
+	if (!a) return null;
+	if (a.classList.contains('mobile-navbar-action-quick-switcher')) return a;
+	return a.querySelector('.lucide-search, [data-icon="search"]') ? a : null; // other builds of the bar
+}
+
+class SearchFind {
+	constructor(plugin) {
+		this.plugin = plugin;
+		this.app = plugin.app;
+		this.isReady = false;
+		this.on = false;
+		this.offs = [];
+		this.press = null; // the press on the search button in progress / just ended: { t, x, y, moved, tap }
+	}
+
+	wanted() {
+		return !this.plugin._unloaded && this.isReady && Platform.isMobile && this.plugin.settings.searchFind === true;
+	}
+
+	ready() {
+		this.isReady = true;
+		this.sync();
+	}
+
+	sync() {
+		if (this.wanted()) this.start();
+		else this.stop();
+	}
+
+	start() {
+		if (this.on) return;
+		this.on = true;
+		const add = (type, fn) => {
+			document.addEventListener(type, fn, { capture: true });
+			this.offs.push(() => document.removeEventListener(type, fn, { capture: true }));
+		};
+		add('pointerdown', (e) => this.down(e));
+		add('pointermove', (e) => this.move(e));
+		add('pointerup', (e) => this.up(e));
+		add('pointercancel', () => (this.press = null));
+		add('click', (e) => this.click(e));
+	}
+
+	stop() {
+		if (!this.on) return;
+		this.on = false;
+		for (const off of this.offs.splice(0)) off();
+		this.press = null;
+	}
+
+	down(e) {
+		this.press = null;
+		if (e.pointerType === 'mouse' && e.button !== 0) return;
+		if (!searchButtonOf(e.target)) return;
+		this.press = { t: performance.now(), x: e.clientX, y: e.clientY, moved: false, tap: false };
+	}
+
+	move(e) {
+		const pr = this.press;
+		if (pr && !pr.moved && Math.hypot(e.clientX - pr.x, e.clientY - pr.y) > BM_MOVE_PX) pr.moved = true;
+	}
+
+	// A tap is a press that stayed put and ended before the hold time (the same time the bookmark menu waits for).
+	up(e) {
+		const pr = this.press;
+		if (!pr) return;
+		if (!pr.moved && Math.hypot(e.clientX - pr.x, e.clientY - pr.y) > BM_MOVE_PX) pr.moved = true;
+		pr.tap = !pr.moved && performance.now() - pr.t < BM_HOLD_MS;
+	}
+
+	click(e) {
+		if (!searchButtonOf(e.target)) return;
+		const pr = this.press;
+		this.press = null;
+		if (pr && !pr.tap) return; // a hold or a swipe: not ours, whatever else is waiting for this click gets it
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (!view) return; // nothing to search in: the button does what Obsidian made it do
+		e.preventDefault();
+		e.stopImmediatePropagation();
+		this.find();
+	}
+
+	find() {
+		const cmds = this.app.commands;
+		try {
+			if (cmds && cmds.executeCommandById('editor:open-search')) return;
+		} catch (err) {
+			/* fall through to the quick switcher */
+		}
+		try {
+			if (cmds) cmds.executeCommandById('switcher:open'); // Find could not open: do what the button did before
+		} catch (err) {
+			/* nothing more to try */
+		}
+	}
+}
+
 class PageBookmarks {
 	constructor(plugin) {
 		this.plugin = plugin;
@@ -1284,10 +1393,7 @@ class PageBookmarks {
 	// ----- the long press ---------------------------------------------------------------------------------------
 
 	searchButton(el) {
-		const a = el && el.closest ? el.closest('.mobile-navbar-action') : null;
-		if (!a) return null;
-		if (a.classList.contains('mobile-navbar-action-quick-switcher')) return a;
-		return a.querySelector('.lucide-search, [data-icon="search"]') ? a : null; // other builds of the bar
+		return searchButtonOf(el);
 	}
 
 	start() {
@@ -2205,6 +2311,7 @@ class NoteMinimapPlugin extends Plugin {
 			if (saved.height === 60) this.settings.height = DEFAULTS.height;
 		}
 		// Full Screen Guard (experimental): off unless it was switched on, and every value kept inside its range.
+		this.settings.searchFind = this.settings.searchFind === true;
 		this.settings.taOn = this.settings.taOn === true;
 		this.settings.taWrap = this.settings.taWrap !== false;
 		this.settings.taPill = this.settings.taPill !== false;
@@ -2246,6 +2353,10 @@ class NoteMinimapPlugin extends Plugin {
 				window.setTimeout(kbRememberView, 450);
 			});
 		}
+
+		// Search button opens Find: a tap on the bottom bar's search button searches the note. Off by default.
+		this.searchFind = new SearchFind(this);
+		this.app.workspace.onLayoutReady(() => this.searchFind.ready());
 
 		// Tab arrows: the bottom bar's arrows switch tabs. Nothing is listening while the setting is off (it is off by default).
 		this.tabArrows = new TabArrows(this);
@@ -2703,6 +2814,7 @@ class NoteMinimapPlugin extends Plugin {
 		if (this.guard) this.guard.stop();
 		if (this.bookmarks) this.bookmarks.stop();
 		if (this.tabArrows) this.tabArrows.stop();
+		if (this.searchFind) this.searchFind.stop();
 		this.applyNativeScrollbar();
 		this.removeStartHook();
 		for (const st of this.states.values()) this.ungateRender(st, true);
@@ -3819,6 +3931,7 @@ class NoteMinimapPlugin extends Plugin {
 	async saveSettings() {
 		if (this.bookmarks) this.bookmarks.sync();
 		if (this.tabArrows) this.tabArrows.sync();
+		if (this.searchFind) this.searchFind.sync();
 		if (this.guard) this.guard.syncSoon(); // Full Screen Guard: start or stop at once, apply a changed value after a pause (nothing while it is off)
 		if (this.settings.animateBars && this._barsCls) this.applyBarsLook(); // speed / style of the bars' slide (also after a reset)
 		this.queueFrameRefresh();
@@ -4153,12 +4266,14 @@ class NoteMinimapPlugin extends Plugin {
 			for (const en of entries) {
 				if (en.target !== st.roContent) {
 					st.cvDirty = true;
+					this.syncFind(st); // the note or its area changed size: the Find bar may have opened, closed or grown
 					break;
 				}
 			}
 			if (!st.running) this.updateViewport(st); // while running, the next frame re-reads and redraws
 		});
 		st.ro.observe(host);
+		this.watchFind(st);
 
 		this.states.set(view, st);
 		return st;
@@ -4175,6 +4290,7 @@ class NoteMinimapPlugin extends Plugin {
 		this.settleBars();
 		this.unbind(st);
 		if (st.ro) st.ro.disconnect();
+		if (st.mo) st.mo.disconnect();
 		if (st.pageTimer) clearTimeout(st.pageTimer);
 		if (st.pageClearTimer) clearTimeout(st.pageClearTimer);
 		this.pageDropAnim(st);
@@ -5194,6 +5310,10 @@ class NoteMinimapPlugin extends Plugin {
 			this.applyPaletteVars(st);
 		}
 
+		st.el.toggleClass('nm-sized', !sb && !(s.top <= 0 && s.height >= 100));
+		st.findEl = null;
+		this.syncFind(st); // the margins may have changed: keep clear of the Find bar if it is open
+
 		if (st.style !== s.style) {
 			this.dropGroove(st); // a fold left over from the other style must not carry across
 			if (st.groove) st.groove.folded = false;
@@ -6202,6 +6322,52 @@ class NoteMinimapPlugin extends Plugin {
 		}
 	}
 
+	// ----- clearing Obsidian's Find bar --------------------------------------------------------------------------
+	// Find (Menu > Find..., or the search button when Search button opens Find is on) opens a bar at the top of the note, in
+	// the same area the strip floats over, and pushes the text down. The strip is placed from the top of that area, so
+	// it ended up on top of the Find bar, with its arrow beside the close button. While Find is open the strip (arrows, thumb
+	// and page bubble with it) now starts just below the bar and is that much shorter; when Find closes it goes back.
+	// The bar is measured, not assumed, so it follows the bar's real height (the Replace row makes it taller) and works the
+	// same on any phone, tablet or desktop. Returns true when the offset changed.
+	syncFind(st) {
+		if (!st || st.dead || !st.el) return false;
+		let f = st.findEl;
+		if (!f || !f.isConnected) f = st.findEl = st.host.querySelector('.document-search-container');
+		let px = 0;
+		if (f && f.offsetHeight) {
+			const cur = st.findPx || 0;
+			const top = parseFloat(getComputedStyle(st.el).top); // where the strip sits now, with the offset already in it
+			if (Number.isFinite(top)) {
+				const bottom = f.getBoundingClientRect().bottom - st.host.getBoundingClientRect().top;
+				px = Math.max(0, Math.ceil(bottom + 8 - (top - cur)));
+			}
+		}
+		if (px === (st.findPx || 0)) return false;
+		st.findPx = px;
+		st.el.style.setProperty('--nm-find', px + 'px');
+		st.el.toggleClass('nm-find', px > 0);
+		// The strip's size changed: whatever was measured from it is read again, as after any resize.
+		st.mx = null;
+		st.rect = null;
+		st.cvDirty = true;
+		return true;
+	}
+
+	// Watches for the Find bar being added to or removed from the note (its direct parent is the note's editing or reading
+	// view, so only direct children are watched: typing in the note never wakes this up).
+	watchFind(st) {
+		if (!st.mo) {
+			st.mo = new MutationObserver(() => {
+				st.findEl = null;
+				this.watchFind(st);
+				if (this.syncFind(st) && !st.running) this.updateViewport(st);
+			});
+		}
+		for (const el of [st.host, ...Array.from(st.host.children)]) {
+			if (el !== st.el) st.mo.observe(el, { childList: true });
+		}
+	}
+
 	updateViewport(st, livePos) {
 		const sc = st.scroller;
 		const s = this.settings;
@@ -6885,6 +7051,15 @@ class MinimapSettingTab extends PluginSettingTab {
 				b.setButtonText('Show').onClick(() => {
 					if (p.settings.bookmarksOn === false) new Notice('Page bookmarks are off.');
 					else p.bookmarks.open();
+				})
+			);
+		new Setting(containerEl)
+			.setName('Search button opens Find')
+			.setDesc('Off by default. Phone and tablet app only. A quick tap on the search button in the bottom bar opens Find in the note you are reading (the same Find bar as Menu > Find...) instead of the quick switcher. Holding the button still opens the bookmark menu when Page bookmarks is on; when Page bookmarks is off, holding goes to the quick switcher, so it is never out of reach. With no note open, the button works as Obsidian made it.')
+			.addToggle((t) =>
+				t.setValue(p.settings.searchFind === true).onChange(async (v) => {
+					p.settings.searchFind = v;
+					await p.saveSettings();
 				})
 			);
 
@@ -7985,6 +8160,7 @@ NoteMinimapPlugin.classify = (text) => classify(text, 0).items;
 NoteMinimapPlugin.FullScreenGuard = FullScreenGuard;
 NoteMinimapPlugin.PageBookmarks = PageBookmarks;
 NoteMinimapPlugin.TabArrows = TabArrows;
+NoteMinimapPlugin.SearchFind = SearchFind;
 module.exports = NoteMinimapPlugin;
 
 /* nosourcemap */
