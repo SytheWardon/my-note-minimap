@@ -724,6 +724,11 @@ html body.nm-animate-bars.is-hidden-nav.is-phone.is-floating-nav .mod-root .work
 	color: var(--text-accent);
 }
 
+/* The header button takes the scrollbar's colour (set on <body> by the script when a custom colour is chosen). */
+.view-action.nm-hand-btn.is-active {
+	color: var(--nm-btn-color, var(--text-accent));
+}
+
 .nm-hand-btn {
 	position: relative;
 	--nm-s: var(--icon-size, 18px);
@@ -1782,6 +1787,55 @@ body {
 .nm-zoomed {
 	--table-text-size: calc(var(--nm-table-base, var(--font-preferred-size)) * var(--nm-zoom, 1));
 	--checkbox-size: calc(var(--nm-checkbox-base, 1.15em) * var(--nm-zoom, 1));
+}
+
+/* Embedded SVGs follow the note's zoom (the script adds nm-zoom-svg beside nm-zoomed, only while Zoom embedded SVGs is on).
+   CSS zoom scales the drawing like text, so it stays sharp. Obsidian never lets a drawing be wider than the note (max-width: 100%), so a
+   drawing is limited to the width of the note's text column instead, which the script measures and keeps in --nm-note-w (plain pixels:
+   zoom multiplies them, so the limit is that width times the zoom, and a drawing is always its usual size times the zoom). A drawing that
+   is then wider than the note is dragged sideways inside its frame, and the note itself does not widen. A percentage would not do for the
+   limit: its frame is as wide as the drawing, so the limit would depend on itself. Only drawings are touched: SVG images, and inline <svg>
+   except Obsidian's own icons, maths (already text-sized) and buttons. */
+.nm-zoomed.nm-zoom-svg :is(img[src*=".svg" i], img[src^="data:image/svg+xml" i]),
+.nm-zoomed.nm-zoom-svg svg:not(.svg-icon):not(mjx-container svg):not(.callout-icon svg):not(.metadata-container svg):not(button svg):not(.clickable-icon svg) {
+	zoom: var(--nm-zoom, 1);
+	/* !important on purpose, for inline <svg> only (see the next rule): notes often give an SVG its own style="max-width:100%", and an
+	   inline style beats a stylesheet unless the stylesheet is important. */
+	max-width: var(--nm-note-w, 100%) !important;
+}
+
+/* An inline <svg> that fills its container (width="100%", or no width at all, as most hand-written diagrams are) has nothing for zoom to
+   scale: zoom does not scale percentages. So it is made wider instead: its container's width times the zoom. */
+.nm-zoomed.nm-zoom-svg svg:not(.svg-icon):not(mjx-container svg):not(.callout-icon svg):not(.metadata-container svg):not(button svg):not(.clickable-icon svg):is([width="100%" i], :not([width])) {
+	zoom: 1;
+	width: calc(100% * var(--nm-zoom, 1));
+	max-width: none !important;
+}
+
+/* The frame of an embedded SVG image: never wider than the note, and it pans. */
+.nm-zoomed.nm-zoom-svg .image-embed:has(img[src*=".svg" i], img[src^="data:image/svg+xml" i]) {
+	max-width: 100%;
+	overflow-x: auto;
+}
+
+/* Reading view: the frame is an inline element, so it needs a box to limit and scroll, as wide as the drawing (max-content: a frame is
+   otherwise never wider than the space left in its line). */
+.nm-zoomed.nm-zoom-svg :is(.markdown-preview-view, .markdown-rendered) .image-embed:has(img[src*=".svg" i], img[src^="data:image/svg+xml" i]) {
+	display: inline-block;
+	vertical-align: top;
+	width: max-content;
+}
+
+/* The editor: Obsidian sizes the image as 100% of a wrapper, inside a frame that fits it. The wrapper is as wide as the drawing, and
+   the frame (limited above) shows part of it and pans. */
+.nm-zoomed.nm-zoom-svg .cm-content .image-embed:has(img[src*=".svg" i], img[src^="data:image/svg+xml" i]) .image-wrapper {
+	width: max-content;
+	flex: none;
+}
+
+/* A drawing that sits straight in a paragraph, or an inline <svg> in its block, pans in that block. */
+.nm-zoomed.nm-zoom-svg :is(p, div, figure):has(> img[src*=".svg" i], > img[src^="data:image/svg+xml" i], > svg:not(.svg-icon):not(mjx-container svg):not(.callout-icon svg):not(.metadata-container svg):not(button svg):not(.clickable-icon svg)) {
+	overflow-x: auto;
 }
 
 /* The percent shown while zooming. */

@@ -28,7 +28,7 @@ const UPDATE_EVERY_MS = 24 * 60 * 60 * 1000; // the automatic check runs at most
 // The version of this code. It travels inside main.js, so it is always the version that is actually running (Obsidian
 // only reads manifest.json at start-up, and reading it from disk ourselves caused a hitch). Keep it equal to the
 // version in manifest.json; the release workflow refuses to publish if they differ.
-const PLUGIN_VERSION = '6.8.1';
+const PLUGIN_VERSION = '7.0.0';
 
 // 1 if version a is newer than b, -1 if older, 0 if the same ("1.2.3" style, a leading "v" is ignored).
 function cmpVer(a, b) {
@@ -101,6 +101,7 @@ const DEFAULTS = {
 	zoomPerNote: false, // each note keeps its own zoom instead
 	zoomNotes: {}, // note path -> its own zoom, used with zoomPerNote
 	zoomShow: true, // a small pill with the percent while zooming
+	zoomSvg: true, // embedded SVG drawings (SVG images and inline SVG) zoom with the text
 	zoomMin: 100, // the smallest zoom (percent): 100 means a note can only be made bigger than normal
 	zoomMax: 300, // the largest zoom (percent)
 	searchFind: false, // a tap on the search button opens Find in the note (long press is unchanged). Off by default
@@ -116,7 +117,7 @@ const DEFAULTS = {
 	fsgCameraEdge: 'device-top', // device-top | top | left | right
 	fsgPadding: 0, // least space (px) kept clear on the camera's edge; 0 = no manual minimum (the detected space still applies)
 	fsgAuto: true, // find the camera's space automatically (what Android reports, remembered, or measured once with a brief status bar probe)
-	fsgLearned: { top: 0, side: 0, tried: false }, // what was found for this phone: space at the top, at a side, and whether the probe already ran
+	fsgLearned: { top: 0, side: 0, tried: false, fails: 0 }, // what was found for this phone: space at the top, at a side, and whether the probe already ran
 	bookmarksOn: true, // long-press the search button: bookmark this page / list of bookmarks
 	bookmarks: [], // { id, path, name, line, page, total, t }
 };
@@ -542,8 +543,8 @@ const FSG_EDGE_VARS = {
 };
 const FSG_EDGES = ['top', 'right', 'bottom', 'left'];
 const FSG_CAMERA_EDGES = ['device-top', 'top', 'left', 'right'];
-// Used only when nothing could be measured at all: Android's standard status bar is 24 dp high (a CSS pixel is a dp in the app).
-const FSG_ESTIMATE = 24;
+// Used only when nothing could be measured at all: Android's status bar is 24 dp high and taller on phones with a big camera cutout, so a slightly generous 32 is used (a CSS pixel is a dp in the app).
+const FSG_ESTIMATE = 32;
 
 function fsgCapacitor() {
 	const cap = window.Capacitor;
@@ -654,7 +655,7 @@ class FullScreenGuard {
 		if (this.running) return;
 		this.running = true;
 		this.sig = this.signature();
-		this.learn(this.measure()); // the status bar is normally still showing now: whatever Android reports is remembered before it is hidden
+		this.learn(this.reportedAll(this.measure())); // the status bar is normally still showing now: whatever Android reports is remembered before it is hidden
 		this.installShowBlocker();
 
 		// Obsidian shows the status bar again when the bars come back (the is-hidden-nav class is removed) and when the
@@ -716,6 +717,8 @@ class FullScreenGuard {
 			}
 		}
 		this._probing = false;
+		if (this._verifyT) clearTimeout(this._verifyT);
+		this._verifyT = null;
 		this.removeProbe();
 		const had = this._applied;
 		this.clearOverrides();
@@ -774,19 +777,87 @@ class FullScreenGuard {
 	}
 
 	callNative(method, options) {
+		this.callPlugin('StatusBar', method, options).catch(() => {});
+	}
+
+	// Asks the phone app itself (through Capacitor) for something. Always returns a promise; it rejects when the app has no
+	// such plugin or method, so callers must catch.
+	callPlugin(plugin, method, options) {
 		const cap = fsgCapacitor();
-		if (!cap) return;
+		if (!cap) return Promise.reject(new Error('no Capacitor'));
 		const call = this._origNative || cap.nativePromise;
 		try {
-			Promise.resolve(call.call(cap, 'StatusBar', method, options || {})).catch(() => {});
+			return Promise.resolve(call.call(cap, plugin, method, options || {}));
 		} catch (e) {
-			/* the status bar plugin is not available: nothing to do */
+			return Promise.reject(e);
+		}
+	}
+
+	withTimeout(p, ms) {
+		let t;
+		const limit = new Promise((_, reject) => {
+			t = setTimeout(() => reject(new Error('timeout')), ms);
+		});
+		return Promise.race([p, limit]).finally(() => clearTimeout(t));
+	}
+
+	// Whether the app says its status bar is showing: true / false, or null when it cannot say.
+	async statusBarVisible() {
+		try {
+			const r = await this.withTimeout(this.callPlugin('StatusBar', 'getInfo'), 900);
+			return r && typeof r.visible === 'boolean' ? r.visible : null;
+		} catch (e) {
+			return null;
+		}
+	}
+
+	// The variables the Android app writes onto the root element when the page loads (checked in Obsidian 1.15.1's native code:
+	// it sets --safe-area-inset-top/bottom/left/right in px, and Obsidian's own layout reads them). They sit above the page's
+	// own env() definition, so they can be right when env() says 0. The guard's own override lives on <body>, never read here.
+	rootVars() {
+		const cs = getComputedStyle(document.documentElement);
+		const read = (name) => {
+			const n = parseFloat(cs.getPropertyValue(name));
+			return Number.isFinite(n) ? Math.max(0, n) : 0;
+		};
+		return { top: read(FSG_EDGE_VARS.top), right: read(FSG_EDGE_VARS.right), bottom: read(FSG_EDGE_VARS.bottom), left: read(FSG_EDGE_VARS.left) };
+	}
+
+	// What the page reports, from both places (env() and the root variables): the larger of the two on each edge.
+	reportedAll(r) {
+		const v = this.rootVars();
+		const out = {};
+		for (const e of FSG_EDGES) out[e] = Math.max((r && r[e]) || 0, v[e] || 0);
+		return out;
+	}
+
+	// After hiding the status bar: asks the app whether it really is hidden. If it still shows, the hide is sent once more;
+	// if it still shows after that, one notice says so. (Obsidian 1.15.1 has only the StatusBar plugin, so there is no second route.)
+	async verifyHidden() {
+		if (!this.shouldHideStatusBar() || this._probing) return;
+		this._barVisible = await this.statusBarVisible();
+		if (this._barVisible !== true || !this.running) return;
+		this.callNative('hide');
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		if (!this.running || this._probing) return;
+		this._barVisible = await this.statusBarVisible();
+		if (this._barVisible === true && !this._warned) {
+			this._warned = true;
+			new Notice('Full screen: the status bar would not hide. Android or another plugin is keeping it.', 8000);
 		}
 	}
 
 	hideStatusBar() {
 		if (this._probing) return; // it is shown on purpose for a moment (see probe())
-		if (this.shouldHideStatusBar()) this.callNative('hide');
+		if (this.shouldHideStatusBar()) {
+			this.callNative('hide');
+			if (!this._verifyT) {
+				this._verifyT = setTimeout(() => {
+					this._verifyT = null;
+					if (this.running) this.verifyHidden();
+				}, 700);
+			}
+		}
 	}
 
 	restoreStatusBar() {
@@ -910,22 +981,39 @@ class FullScreenGuard {
 		const finish = () => {
 			const shown = this.viewHeight();
 			const env = this.measure();
+			const root = this.rootVars();
 			diag.shownH = shown;
 			diag.envShown = env.top;
+			diag.rootTop = root.top;
 			const lost = Math.max(0, (diag.hiddenH || shown) - shown);
-			const found = Math.min(160, Math.round(Math.max(lost, env.top) * 10) / 10);
 			diag.lost = Math.round(lost * 10) / 10;
-			if (found > L.top) L.top = found;
-			const side = Math.round(Math.max(env.left, env.right) * 10) / 10;
-			if (side > L.side) L.side = side;
-			L.tried = true;
-			this._diag = diag;
-			this._probing = false;
-			this.save();
-			this.scheduleHide([0, 200, 600]);
-			this.scheduleApply([0, 150, 500, 1200]);
-			this.later(() => this.plugin.guardInsetsChanged(), 700);
-			if (done) done(found);
+			// Everything found is combined: the largest value wins.
+			{
+				if (!this.running) {
+					if (done) done(0);
+					return;
+				}
+				const found = Math.min(160, Math.round(Math.max(lost, env.top, root.top) * 10) / 10);
+				if (found > L.top) L.top = found;
+				const side = Math.round(Math.max(env.left, env.right, root.left, root.right) * 10) / 10;
+				if (side > L.side) L.side = side;
+				if (found > 0 || side > 0) {
+					L.fails = 0;
+					L.tried = true;
+				} else {
+					// Nothing came back: try again a little later (up to three tries in all) before settling for the estimate.
+					L.fails = (L.fails || 0) + 1;
+					L.tried = L.fails >= 3;
+					if (!L.tried) this.later(() => this.probe(true), 2500 * L.fails);
+				}
+				this._diag = diag;
+				this._probing = false;
+				this.save();
+				this.scheduleHide([0, 200, 600]);
+				this.scheduleApply([0, 150, 500, 1200]);
+				this.later(() => this.plugin.guardInsetsChanged(), 700);
+				if (done) done(found);
+			}
 		};
 		this.later(() => {
 			if (!this._probing) return;
@@ -952,6 +1040,7 @@ class FullScreenGuard {
 		L.top = 0;
 		L.side = 0;
 		L.tried = false;
+		L.fails = 0;
 		this._diag = null;
 		this.save();
 		if (!this.running) {
@@ -979,7 +1068,12 @@ class FullScreenGuard {
 	}
 
 	clearOverrides() {
-		for (const edge of FSG_EDGES) document.body.style.removeProperty(FSG_EDGE_VARS[edge]);
+		const o = this._origInline || {};
+		for (const edge of FSG_EDGES) {
+			document.body.style.removeProperty(FSG_EDGE_VARS[edge]);
+			if (o[edge]) document.body.style.setProperty(FSG_EDGE_VARS[edge], o[edge]); // whatever was there before the guard
+		}
+		this._origInline = null;
 		this._applied = '';
 		this._reserved = null;
 	}
@@ -1001,7 +1095,7 @@ class FullScreenGuard {
 	applyInsets() {
 		if (!this.running) return;
 		const reported = this.measure();
-		if (this.learn(reported)) this.later(() => this.plugin.guardInsetsChanged(), 0);
+		if (this.learn(this.reportedAll(reported))) this.later(() => this.plugin.guardInsetsChanged(), 0);
 		const side = this.cameraSide();
 		const want = this.spaceFor(side, reported);
 		if (want <= 0 || want <= reported[side]) {
@@ -1015,6 +1109,10 @@ class FullScreenGuard {
 		const value = Math.round(want * 100) / 100;
 		const key = side + ':' + value;
 		if (key === this._applied) return;
+		if (!this._origInline) {
+			this._origInline = {};
+			for (const edge of FSG_EDGES) this._origInline[edge] = document.body.style.getPropertyValue(FSG_EDGE_VARS[edge]);
+		}
 		for (const edge of FSG_EDGES) {
 			if (edge === side) document.body.style.setProperty(FSG_EDGE_VARS[edge], value + 'px');
 			else document.body.style.removeProperty(FSG_EDGE_VARS[edge]);
@@ -1050,7 +1148,9 @@ class FullScreenGuard {
 		else if (L.tried) found = ' Nothing could be measured, so the standard ' + FSG_ESTIMATE + ' px status bar height is used as an estimate: raise the slider if the bars still touch the camera.';
 		else found = ' Nothing found yet.';
 		const d = this._diag;
-		if (d && d.hiddenH) found += ' Last check: view ' + Math.round(d.hiddenH) + ' px high with the status bar hidden, ' + Math.round(d.shownH) + ' px with it showing (' + fmt(d.lost) + ' lost), Android reported ' + fmt(d.envShown) + '.';
+		if (d && d.hiddenH) found += ' Last check: view ' + Math.round(d.hiddenH) + ' px high with the status bar hidden, ' + Math.round(d.shownH) + ' px with it showing (' + fmt(d.lost) + ' lost), Android reported ' + fmt(d.envShown) + ', the app variables ' + fmt(d.rootTop || 0) + '.';
+		if (this._barVisible === true) found += ' The app says the status bar is still showing.';
+		else if (this._barVisible === false) found += ' The app confirms the status bar is hidden.';
 		return (
 			'Top ' + fmt(r.top) + ', right ' + fmt(r.right) + ', bottom ' + fmt(r.bottom) + ', left ' + fmt(r.left) +
 			'. Camera edge now: ' + side + '.' + found + ' Space used on that edge: ' + fmt(used) + '.'
@@ -2407,6 +2507,8 @@ class TabArrows {
 //   - It works in editing and reading view, and the same zoom is kept when you switch between them.
 //   - The zoom is remembered: one level for every note, or (Zoom each note separately) one level for each note.
 //   - A small pill shows the percent while you pinch. Commands zoom in, zoom out and reset, for the command palette.
+//   - Drawings embedded in the note (SVG images, and inline SVG) are scaled with the text, by the same amount, and stay sharp.
+//     A drawing that becomes wider than the note is panned sideways inside its own frame (Zoom embedded SVGs).
 // How: a class on the note's view area and one variable; a few lines of the stylesheet turn it into the note's font size
 // (see .nm-zoomed). At 100% nothing is added at all, so a note looks exactly as Obsidian draws it. Nothing is listening while
 // the setting is off, and switching it off puts every note back at its normal size (the saved levels are kept).
@@ -2428,6 +2530,7 @@ class NoteZoom {
 		this.pill = null;
 		this.pillTimer = 0;
 		this.applyRaf = 0;
+		this.watchers = new Map(); // view -> ResizeObserver, while its SVG drawings are zoomed (to keep --nm-note-w current)
 	}
 
 	get s() {
@@ -2494,6 +2597,8 @@ class NoteZoom {
 		if (this.pill) this.pill.remove();
 		this.pill = null;
 		for (const view of this.views()) this.applyTo(view, 100); // every note back to its normal size
+		for (const ro of this.watchers.values()) ro.disconnect();
+		this.watchers.clear();
 	}
 
 	// ----- levels -----------------------------------------------------------------------------------------------
@@ -2591,18 +2696,65 @@ class NoteZoom {
 		for (const view of this.views()) this.applyTo(view, this.levelFor(view));
 	}
 
+	// The width of the note's text column in px (without its padding). A drawing may be as wide as this times the zoom (see styles.css).
+	columnWidth(view) {
+		const root = view && view.contentEl;
+		if (!root) return 0;
+		const preview = view.getMode && view.getMode() === 'preview';
+		const el = root.querySelector(preview ? '.markdown-preview-section, .markdown-preview-sizer' : '.cm-content');
+		if (!el) return 0;
+		const cs = getComputedStyle(el);
+		return Math.max(0, Math.round(el.clientWidth - (parseFloat(cs.paddingLeft) || 0) - (parseFloat(cs.paddingRight) || 0)));
+	}
+
+	// Keeps --nm-note-w (the column width) on the note while its SVG drawings are zoomed, and current when the note changes width
+	// (turning the phone, a split pane, the sidebar). Nothing is kept for a note whose drawings are not zoomed.
+	watchColumn(view, on) {
+		const el = view && view.contentEl;
+		if (!el) return;
+		if (!on) {
+			el.style.removeProperty('--nm-note-w');
+			const ro = this.watchers.get(view);
+			if (ro) ro.disconnect();
+			this.watchers.delete(view);
+			return;
+		}
+		const set = () => {
+			const w = this.columnWidth(view);
+			if (w > 0) el.style.setProperty('--nm-note-w', w + 'px');
+		};
+		set();
+		if (!this.watchers.has(view) && typeof ResizeObserver === 'function') {
+			let raf = 0;
+			const ro = new ResizeObserver(() => {
+				if (raf) return;
+				raf = window.requestAnimationFrame(() => {
+					raf = 0;
+					set();
+				});
+			});
+			ro.observe(el);
+			this.watchers.set(view, ro);
+		}
+	}
+
 	// Puts a note at a level: at 100 every trace is removed. Returns true when something changed.
 	applyTo(view, level) {
 		const el = view && view.contentEl;
 		if (!el) return false;
 		const now = el.classList.contains('nm-zoomed') ? el.style.getPropertyValue('--nm-zoom') : '';
+		// Embedded SVGs follow the zoom only when asked to (and only while the note is zoomed at all).
+		const svg = level !== 100 && this.s.zoomSvg !== false;
+		const svgChanged = el.classList.contains('nm-zoom-svg') !== svg;
+		el.classList.toggle('nm-zoom-svg', svg);
+		this.watchColumn(view, svg);
 		if (level === 100) {
-			if (!now) return false;
+			if (!now) return svgChanged;
 			el.classList.remove('nm-zoomed');
 			el.style.removeProperty('--nm-zoom');
 		} else {
 			const v = String(level / 100);
-			if (now === v) return false;
+			if (now === v) return svgChanged;
 			el.classList.add('nm-zoomed');
 			el.style.setProperty('--nm-zoom', v);
 		}
@@ -2929,6 +3081,7 @@ class NoteMinimapPlugin extends Plugin {
 		this.settings.zoomOn = this.settings.zoomOn === true;
 		this.settings.zoomPerNote = this.settings.zoomPerNote === true;
 		this.settings.zoomShow = this.settings.zoomShow !== false;
+		this.settings.zoomSvg = this.settings.zoomSvg !== false;
 		this.settings.zoomMin = Math.max(25, Math.min(100, Math.round(Number(this.settings.zoomMin)) || DEFAULTS.zoomMin));
 		this.settings.zoomMax = Math.max(100, Math.min(500, Math.round(Number(this.settings.zoomMax)) || DEFAULTS.zoomMax));
 		this.settings.zoomPct = Math.max(this.settings.zoomMin, Math.min(this.settings.zoomMax, Math.round(Number(this.settings.zoomPct)) || 100));
@@ -2955,7 +3108,7 @@ class NoteMinimapPlugin extends Plugin {
 		{
 			const fl = this.settings.fsgLearned;
 			const num = (v) => Math.max(0, Math.min(160, Math.round((Number(v) || 0) * 10) / 10));
-			this.settings.fsgLearned = { top: num(fl && fl.top), side: num(fl && fl.side), tried: !!(fl && fl.tried) };
+			this.settings.fsgLearned = { top: num(fl && fl.top), side: num(fl && fl.side), tried: !!(fl && fl.tried), fails: Math.max(0, Math.min(3, Math.round(Number(fl && fl.fails) || 0))) };
 		}
 		this.settings.fsgPadding = Math.min(120, Math.max(0, Math.round(Number(this.settings.fsgPadding) || 0)));
 		this.settings.ver = 13;
@@ -3252,7 +3405,7 @@ class NoteMinimapPlugin extends Plugin {
 		try {
 			const el = document.body.createDiv();
 			el.style.cssText =
-				'position:fixed;visibility:hidden;pointer-events:none;padding:env(safe-area-inset-top,0px) env(safe-area-inset-right,0px) env(safe-area-inset-bottom,0px) env(safe-area-inset-left,0px)';
+				'position:fixed;visibility:hidden;pointer-events:none;padding:var(--safe-area-inset-top,env(safe-area-inset-top,0px)) var(--safe-area-inset-right,env(safe-area-inset-right,0px)) var(--safe-area-inset-bottom,env(safe-area-inset-bottom,0px)) var(--safe-area-inset-left,env(safe-area-inset-left,0px))';
 			const cs = getComputedStyle(el);
 			out.top = parseFloat(cs.paddingTop) || 0;
 			out.right = parseFloat(cs.paddingRight) || 0;
@@ -3477,6 +3630,7 @@ class NoteMinimapPlugin extends Plugin {
 		this.clearToast();
 		for (const view of Array.from(this.states.keys())) this.detach(view);
 		this.clearButtons();
+		this.applyButtonColor();
 		this.releaseBars();
 	}
 
@@ -4438,6 +4592,7 @@ class NoteMinimapPlugin extends Plugin {
 
 	// The button is highlighted while the touch area is on.
 	refreshButtons() {
+		this.applyButtonColor();
 		const on = this.settings.touchEnabled;
 		const nm = this.barName();
 		const low = nm.toLowerCase();
@@ -4576,7 +4731,16 @@ class NoteMinimapPlugin extends Plugin {
 		}
 	}
 
+	// The header button follows the scrollbar's colour: a custom colour is shared with the button through a
+	// variable on <body>; Auto (empty) removes it, so the button falls back to the theme accent.
+	applyButtonColor() {
+		const c = !this._unloaded && this.settings.thumbColor;
+		if (c) document.body.style.setProperty('--nm-btn-color', c);
+		else document.body.style.removeProperty('--nm-btn-color');
+	}
+
 	async saveSettings() {
+		this.applyButtonColor();
 		if (this.bookmarks) this.bookmarks.sync();
 		if (this.tabArrows) this.tabArrows.sync();
 		if (this.searchFind) this.searchFind.sync();
@@ -8249,6 +8413,15 @@ class MinimapSettingTab extends PluginSettingTab {
 				.addToggle((t) =>
 					t.setValue(p.settings.zoomPerNote === true).onChange(async (v) => {
 						p.settings.zoomPerNote = v;
+						await p.saveSettings();
+					})
+				);
+			new Setting(zoomFold.inner)
+				.setName('Zoom embedded SVGs')
+				.setDesc('On: SVG drawings in a note (SVG images and inline SVG) grow and shrink with the text. A drawing wider than the note can be dragged sideways. Off: only the text zooms.')
+				.addToggle((t) =>
+					t.setValue(p.settings.zoomSvg !== false).onChange(async (v) => {
+						p.settings.zoomSvg = v;
 						await p.saveSettings();
 					})
 				);
