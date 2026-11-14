@@ -28,7 +28,7 @@ const UPDATE_EVERY_MS = 24 * 60 * 60 * 1000; // the automatic check runs at most
 // The version of this code. It travels inside main.js, so it is always the version that is actually running (Obsidian
 // only reads manifest.json at start-up, and reading it from disk ourselves caused a hitch). Keep it equal to the
 // version in manifest.json; the release workflow refuses to publish if they differ.
-const PLUGIN_VERSION = '6.5.2';
+const PLUGIN_VERSION = '6.8.0';
 
 // 1 if version a is newer than b, -1 if older, 0 if the same ("1.2.3" style, a leading "v" is ignored).
 function cmpVer(a, b) {
@@ -96,6 +96,13 @@ const DEFAULTS = {
 	dragSlop: 6, // px: while a finger or pointer is held on the strip, movement smaller than this is ignored (0 = off)
 	exclusions: [],
 	// EXPERIMENTAL: Full Screen Guard (see FullScreenGuard). Off unless switched on under Settings > Experimental.
+	zoomOn: false, // Note zoom: pinch to make a note's text bigger or smaller. Off by default
+	zoomPct: 100, // the zoom shared by every note (percent)
+	zoomPerNote: false, // each note keeps its own zoom instead
+	zoomNotes: {}, // note path -> its own zoom, used with zoomPerNote
+	zoomShow: true, // a small pill with the percent while zooming
+	zoomMin: 100, // the smallest zoom (percent): 100 means a note can only be made bigger than normal
+	zoomMax: 300, // the largest zoom (percent)
 	searchFind: false, // a tap on the search button opens Find in the note (long press is unchanged). Off by default
 	taOn: false, // Tab arrows (the old Tab Arrows plugin): the bottom bar's left and right arrows switch tabs. Off by default
 	taWrap: true, // from the last tab, "next" goes to the first (and the other way round)
@@ -107,7 +114,9 @@ const DEFAULTS = {
 	fsgForce: true, // keep the status bar hidden
 	fsgKeepAuto: true, // keep Obsidian's own "Auto full screen" setting on
 	fsgCameraEdge: 'device-top', // device-top | top | left | right
-	fsgPadding: 0, // least space (px) kept clear on the camera's edge; 0 = only what Android reports
+	fsgPadding: 0, // least space (px) kept clear on the camera's edge; 0 = no manual minimum (the detected space still applies)
+	fsgAuto: true, // find the camera's space automatically (what Android reports, remembered, or measured once with a brief status bar probe)
+	fsgLearned: { top: 0, side: 0, tried: false }, // what was found for this phone: space at the top, at a side, and whether the probe already ran
 	bookmarksOn: true, // long-press the search button: bookmark this page / list of bookmarks
 	bookmarks: [], // { id, path, name, line, page, total, t }
 };
@@ -505,8 +514,14 @@ const NATIVE_SCROLLBAR_CSS = `
 //      it again when you scroll up or close the keyboard; this stops it coming back.
 //   2. Keep the note and Obsidian's bars clear of the camera cutout. Obsidian positions everything with the CSS
 //      variables --safe-area-inset-top/right/bottom/left (from what Android reports). With the status bar hidden
-//      Android can report 0 although the screen still reaches under the camera, so this keeps a minimum amount of
-//      space clear on the camera's edge.
+//      Android can report 0 although the screen still reaches under the camera, so this keeps space clear on the
+//      camera's edge. How much is found automatically (Settings > Experimental > Full Screen Guard > Detect the space
+//      automatically, on by default): whenever Android reports a space it is remembered for this phone, and if it has
+//      never reported one, the status bar is hidden and shown once, and two things are read: what Android reports for
+//      the camera edge, and how much SHORTER the app's view gets when the status bar comes back (Obsidian's layout sits
+//      below the status bar, so Android reports 0 for it, but the view loses exactly its height). If neither can be
+//      measured the standard 24 px status bar height is used as an estimate. The slider is a minimum on top of that.
+//      The space used is the largest of what Android reports now, what was detected, and the slider.
 //
 // How it reaches the status bar (checked against Obsidian 1.15.0's app.js): Obsidian holds the status bar as a
 // Capacitor plugin and calls StatusBar.hide() / StatusBar.show({animation}) on it. Capacitor sends every such call
@@ -527,6 +542,8 @@ const FSG_EDGE_VARS = {
 };
 const FSG_EDGES = ['top', 'right', 'bottom', 'left'];
 const FSG_CAMERA_EDGES = ['device-top', 'top', 'left', 'right'];
+// Used only when nothing could be measured at all: Android's standard status bar is 24 dp high (a CSS pixel is a dp in the app).
+const FSG_ESTIMATE = 24;
 
 function fsgCapacitor() {
 	const cap = window.Capacitor;
@@ -552,6 +569,7 @@ class FullScreenGuard {
 		this._probe = null;
 		this._soonT = null;
 		this._soonFrom = 0;
+		this._probing = false; // the status bar is shown on purpose for a moment, to read the space it takes
 	}
 
 	get s() {
@@ -560,7 +578,7 @@ class FullScreenGuard {
 
 	signature() {
 		const s = this.s;
-		return [s.fsgForce, s.fsgKeepAuto, s.fsgCameraEdge, s.fsgPadding].join('|');
+		return [s.fsgForce, s.fsgKeepAuto, s.fsgCameraEdge, s.fsgPadding, s.fsgAuto].join('|');
 	}
 
 	// On only when it was switched on, on the phone app, once the workspace is up, and while the plugin is loaded.
@@ -636,6 +654,7 @@ class FullScreenGuard {
 		if (this.running) return;
 		this.running = true;
 		this.sig = this.signature();
+		this.learn(this.measure()); // the status bar is normally still showing now: whatever Android reports is remembered before it is hidden
 		this.installShowBlocker();
 
 		// Obsidian shows the status bar again when the bars come back (the is-hidden-nav class is removed) and when the
@@ -696,6 +715,7 @@ class FullScreenGuard {
 				/* already gone */
 			}
 		}
+		this._probing = false;
 		this.removeProbe();
 		const had = this._applied;
 		this.clearOverrides();
@@ -711,6 +731,7 @@ class FullScreenGuard {
 		if (this.shouldHideStatusBar()) this.scheduleHide([0, 250, 900]);
 		else this.restoreStatusBar();
 		this.scheduleApply([0, 150, 500]);
+		this.later(() => this.probe(false), 1400); // after the hiding above has settled
 	}
 
 	later(fn, ms) {
@@ -764,6 +785,7 @@ class FullScreenGuard {
 	}
 
 	hideStatusBar() {
+		if (this._probing) return; // it is shown on purpose for a moment (see probe())
 		if (this.shouldHideStatusBar()) this.callNative('hide');
 	}
 
@@ -817,6 +839,134 @@ class FullScreenGuard {
 		return { top: num(cs.paddingTop), right: num(cs.paddingRight), bottom: num(cs.paddingBottom), left: num(cs.paddingLeft) };
 	}
 
+	// ----- finding the camera's space automatically ------------------------------------------------------------
+
+	// Remembers what Android reports, for this phone: the largest space seen at the top (portrait: the status bar, which holds
+	// the camera) and at either side (landscape: the cutout itself). It only ever grows, so a moment when Android reports less
+	// (the status bar hidden) cannot make the space jump back and forth. Returns true when something new was learned.
+	learn(reported) {
+		if (!this.s.fsgAuto) return false;
+		const L = this.s.fsgLearned;
+		const round = (n) => Math.min(160, Math.round((Number(n) || 0) * 10) / 10);
+		const top = round(reported.top);
+		const side = round(Math.max(reported.left, reported.right));
+		let changed = false;
+		if (top > L.top) {
+			L.top = top;
+			changed = true;
+		}
+		if (side > L.side) {
+			L.side = side;
+			changed = true;
+		}
+		if (changed) this.save();
+		return changed;
+	}
+
+	save() {
+		this.plugin.saveDirty = true;
+		this.plugin.saveSoon();
+	}
+
+	// The space found for an edge: at a side the cutout's own depth if it was seen, else the top's; 0 when automatic detection is off.
+	auto(side) {
+		if (!this.s.fsgAuto) return 0;
+		const L = this.s.fsgLearned || {};
+		const found = side === 'left' || side === 'right' ? L.side || L.top || 0 : L.top || 0;
+		// The measuring ran and found nothing at all: use the standard status bar height rather than nothing (the slider can raise it).
+		return found || (L.tried ? FSG_ESTIMATE : 0);
+	}
+
+	// How much space to keep clear on an edge: the largest of what Android reports, what was found, and the slider.
+	spaceFor(side, reported) {
+		const pad = Math.max(0, Number(this.s.fsgPadding) || 0);
+		return Math.max(reported ? reported[side] : 0, this.auto(side), pad);
+	}
+
+	// Measures the space the status bar takes, on this phone, once. The status bar is hidden, then shown with no animation, and
+	// two things are read: what Android reports for the camera edge (env), and how much shorter the app's view got (Obsidian's
+	// layout sits below the status bar, so Android reports 0 for it, but the view loses exactly its height). The larger is kept. Then
+	// it is hidden again. It runs only with automatic detection on, only while nothing is known yet, and only once per phone unless
+	// "Detect again" is used. `done(found)` is called when it ends (found = px, 0 when nothing could be measured).
+	probe(force, done) {
+		if (!this.running || this._probing || !this.s.fsgAuto) {
+			if (done) done(0);
+			return;
+		}
+		const L = this.s.fsgLearned;
+		if (!force && (L.top > 0 || L.side > 0 || L.tried)) {
+			if (done) done(L.top || L.side);
+			return;
+		}
+		if (!fsgCapacitor()) {
+			L.tried = true;
+			this.save();
+			if (done) done(0);
+			return;
+		}
+		this._probing = true;
+		const diag = { at: Date.now() };
+		this.callNative('hide'); // already hidden is fine; the view is measured without the bar first
+		const finish = () => {
+			const shown = this.viewHeight();
+			const env = this.measure();
+			diag.shownH = shown;
+			diag.envShown = env.top;
+			const lost = Math.max(0, (diag.hiddenH || shown) - shown);
+			const found = Math.min(160, Math.round(Math.max(lost, env.top) * 10) / 10);
+			diag.lost = Math.round(lost * 10) / 10;
+			if (found > L.top) L.top = found;
+			const side = Math.round(Math.max(env.left, env.right) * 10) / 10;
+			if (side > L.side) L.side = side;
+			L.tried = true;
+			this._diag = diag;
+			this._probing = false;
+			this.save();
+			this.scheduleHide([0, 200, 600]);
+			this.scheduleApply([0, 150, 500, 1200]);
+			this.later(() => this.plugin.guardInsetsChanged(), 700);
+			if (done) done(found);
+		};
+		this.later(() => {
+			if (!this._probing) return;
+			diag.hiddenH = this.viewHeight();
+			diag.envHidden = this.measure().top;
+			this.callNative('show', { animation: 'NONE' }); // goes around the blocker, which only stops Obsidian's own calls
+			let polls = 0;
+			const poll = () => {
+				if (!this._probing) return;
+				// Android updates the view and its numbers a moment after the bar appears: wait for them, but not for ever.
+				if (diag.hiddenH - this.viewHeight() >= 8 || this.measure().top > 0 || ++polls >= 14) {
+					this.later(finish, 120); // one more beat, so a view that is still settling has settled
+				} else {
+					this.later(poll, 110);
+				}
+			};
+			this.later(poll, 160);
+		}, 450);
+	}
+
+	// Forgets what was found and measures again. `done(found)` is called when it is finished.
+	redetect(done) {
+		const L = this.s.fsgLearned;
+		L.top = 0;
+		L.side = 0;
+		L.tried = false;
+		this._diag = null;
+		this.save();
+		if (!this.running) {
+			if (done) done(0);
+			return;
+		}
+		this.scheduleApply([0]);
+		this.probe(true, done);
+	}
+
+	// The height of the app's view in px (the status bar being shown or hidden changes it).
+	viewHeight() {
+		return window.innerHeight;
+	}
+
 	// The screen edge the camera is on right now.
 	cameraSide() {
 		const mode = this.s.fsgCameraEdge;
@@ -844,13 +994,17 @@ class FullScreenGuard {
 		for (const ms of delays) this.later(() => this.applyInsets(), ms);
 	}
 
-	// Sets the safe-area variable of the camera's edge to max(what Android reports, the minimum space asked for).
-	// Plain pixel numbers are used on purpose: Obsidian reads these variables with parseFloat, which cannot read a
-	// max() expression. Other edges, and everything when the minimum is 0, are left exactly as Obsidian sets them.
+	// Sets the safe-area variable of the camera's edge to the space wanted there (see spaceFor): the largest of what Android
+	// reports, what was found automatically, and the slider. Plain pixel numbers are used on purpose: Obsidian reads these
+	// variables with parseFloat, which cannot read a max() expression. When Android already reports at least that much, and for
+	// every other edge, Obsidian's own values are left exactly as they are.
 	applyInsets() {
 		if (!this.running) return;
-		const pad = Math.max(0, Number(this.s.fsgPadding) || 0);
-		if (pad <= 0) {
+		const reported = this.measure();
+		if (this.learn(reported)) this.later(() => this.plugin.guardInsetsChanged(), 0);
+		const side = this.cameraSide();
+		const want = this.spaceFor(side, reported);
+		if (want <= 0 || want <= reported[side]) {
 			if (this._applied) {
 				this.clearOverrides();
 				this.nudgeLayout();
@@ -858,9 +1012,7 @@ class FullScreenGuard {
 			}
 			return;
 		}
-		const reported = this.measure();
-		const side = this.cameraSide();
-		const value = Math.round(Math.max(reported[side], pad) * 100) / 100;
+		const value = Math.round(want * 100) / 100;
 		const key = side + ':' + value;
 		if (key === this._applied) return;
 		for (const edge of FSG_EDGES) {
@@ -883,18 +1035,25 @@ class FullScreenGuard {
 		}
 	}
 
-	// The line shown under the settings: what Android reports, which edge, and the space in use.
+	// The line shown under the settings: what Android reports, which edge, what was found, and the space in use.
 	describe() {
 		if (!Platform.isMobileApp) return 'Not available on desktop.';
 		const r = this.measure();
 		if (!this.running) this.removeProbe(); // measured only for this line; nothing stays on the page while the guard is off
 		const side = this.cameraSide();
-		const pad = Math.max(0, Number(this.s.fsgPadding) || 0);
-		const used = pad > 0 ? Math.max(r[side], pad) : r[side];
+		const used = this.spaceFor(side, r);
 		const fmt = (n) => Math.round(n * 10) / 10 + ' px';
+		const L = this.s.fsgLearned || {};
+		let found;
+		if (!this.s.fsgAuto) found = ' Automatic detection is off.';
+		else if (L.top > 0 || L.side > 0) found = ' Found for this phone: top ' + fmt(L.top) + ', side ' + fmt(L.side) + '.';
+		else if (L.tried) found = ' Nothing could be measured, so the standard ' + FSG_ESTIMATE + ' px status bar height is used as an estimate: raise the slider if the bars still touch the camera.';
+		else found = ' Nothing found yet.';
+		const d = this._diag;
+		if (d && d.hiddenH) found += ' Last check: view ' + Math.round(d.hiddenH) + ' px high with the status bar hidden, ' + Math.round(d.shownH) + ' px with it showing (' + fmt(d.lost) + ' lost), Android reported ' + fmt(d.envShown) + '.';
 		return (
 			'Top ' + fmt(r.top) + ', right ' + fmt(r.right) + ', bottom ' + fmt(r.bottom) + ', left ' + fmt(r.left) +
-			'. Camera edge now: ' + side + '. Space used on that edge: ' + fmt(used) + '.'
+			'. Camera edge now: ' + side + '.' + found + ' Space used on that edge: ' + fmt(used) + '.'
 		);
 	}
 }
@@ -2239,6 +2398,462 @@ class TabArrows {
 	}
 }
 
+// ---------------------------------------------------------------------------------------------------------------
+// Note zoom (off by default)
+//
+// Pinch with two fingers on a note to make its text bigger or smaller, on the phone or tablet. The text reflows as you pinch,
+// and the place under your fingers stays under them (moving the fingers together scrolls). Only the note's text is scaled:
+// headings, lists, tables, code and checkboxes follow it, while Obsidian's own menus, bars and the strip keep their size.
+//   - It works in editing and reading view, and the same zoom is kept when you switch between them.
+//   - The zoom is remembered: one level for every note, or (Zoom each note separately) one level for each note.
+//   - A small pill shows the percent while you pinch. Commands zoom in, zoom out and reset, for the command palette.
+// How: a class on the note's view area and one variable; a few lines of the stylesheet turn it into the note's font size
+// (see .nm-zoomed). At 100% nothing is added at all, so a note looks exactly as Obsidian draws it. Nothing is listening while
+// the setting is off, and switching it off puts every note back at its normal size (the saved levels are kept).
+// ---------------------------------------------------------------------------------------------------------------
+const ZOOM_FLOOR = 25; // the smallest and largest the range setting can be set to
+const ZOOM_CEIL = 500;
+const ZOOM_STEP = 10; // the zoom in / zoom out commands
+const ZOOM_SKIP = '.note-minimap, .document-search-container, .mobile-toolbar'; // pinching on these is not for the note
+
+class NoteZoom {
+	constructor(plugin) {
+		this.plugin = plugin;
+		this.app = plugin.app;
+		this.isReady = false;
+		this.on = false;
+		this.offs = [];
+		this.refs = [];
+		this.g = null; // the pinch in progress
+		this.pill = null;
+		this.pillTimer = 0;
+		this.applyRaf = 0;
+	}
+
+	get s() {
+		return this.plugin.settings;
+	}
+
+	wanted() {
+		return !this.plugin._unloaded && this.isReady && this.s.zoomOn === true;
+	}
+
+	ready() {
+		this.isReady = true;
+		this.sync();
+	}
+
+	// Starts, stops, or applies a changed setting (range, per note). Cheap when nothing changed.
+	sync() {
+		if (!this.wanted()) {
+			this.stop();
+			return;
+		}
+		this.tidy();
+		this.start();
+		this.applyAll();
+	}
+
+	start() {
+		if (this.on) return;
+		this.on = true;
+		const add = (type, fn, opts) => {
+			document.addEventListener(type, fn, opts);
+			this.offs.push(() => document.removeEventListener(type, fn, opts));
+		};
+		if ('ontouchstart' in window || (navigator.maxTouchPoints || 0) > 0) {
+			// Not passive: the pinch must be able to stop the page from scrolling or zooming itself.
+			add('touchstart', (e) => this.touchStart(e), { capture: true, passive: false });
+			add('touchmove', (e) => this.touchMove(e), { capture: true, passive: false });
+			add('touchend', (e) => this.touchEnd(e), { capture: true });
+			add('touchcancel', (e) => this.touchEnd(e), { capture: true });
+		}
+		const ws = this.app.workspace;
+		for (const name of ['active-leaf-change', 'layout-change', 'file-open']) this.refs.push([ws, ws.on(name, () => this.queueApply())]);
+		const vault = this.app.vault;
+		// Each note's own level follows the note when it is renamed, and goes when it is deleted.
+		this.refs.push([vault, vault.on('rename', (f, oldPath) => this.moved(oldPath, f && f.path))]);
+		this.refs.push([vault, vault.on('delete', (f) => this.moved(f && f.path, null))]);
+	}
+
+	stop() {
+		if (!this.on) return;
+		this.on = false;
+		for (const off of this.offs.splice(0)) off();
+		for (const [owner, ref] of this.refs.splice(0)) {
+			try {
+				owner.offref(ref);
+			} catch (e) {
+				/* already gone */
+			}
+		}
+		this.endPinch(false);
+		if (this.applyRaf) window.cancelAnimationFrame(this.applyRaf);
+		this.applyRaf = 0;
+		window.clearTimeout(this.pillTimer);
+		if (this.pill) this.pill.remove();
+		this.pill = null;
+		for (const view of this.views()) this.applyTo(view, 100); // every note back to its normal size
+	}
+
+	// ----- levels -----------------------------------------------------------------------------------------------
+
+	// The smallest and largest zoom, as whole percents (a stored value that is not whole is rounded here, never passed on).
+	range() {
+		const min = Math.round(Number(this.s.zoomMin));
+		const max = Math.round(Number(this.s.zoomMax));
+		const lo = Math.max(ZOOM_FLOOR, Math.min(100, Number.isFinite(min) && min > 0 ? min : DEFAULTS.zoomMin));
+		const hi = Math.min(ZOOM_CEIL, Math.max(100, Number.isFinite(max) && max > 0 ? max : DEFAULTS.zoomMax));
+		return [lo, hi];
+	}
+
+	// A zoom level is always a whole percent between the smallest and the largest.
+	clamp(v) {
+		const [lo, hi] = this.range();
+		const n = Math.round(Number(v));
+		return Math.max(lo, Math.min(hi, Number.isFinite(n) && n > 0 ? n : 100));
+	}
+
+	// Whole numbers in the saved settings, so that what is stored is always what is shown and used.
+	tidy() {
+		const s = this.s;
+		const [lo, hi] = this.range();
+		let changed = false;
+		for (const [key, v] of [
+			['zoomMin', lo],
+			['zoomMax', hi],
+			['zoomPct', this.clamp(s.zoomPct)],
+		]) {
+			if (s[key] !== v) {
+				s[key] = v;
+				changed = true;
+			}
+		}
+		if (changed) {
+			this.plugin.saveDirty = true;
+			this.plugin.saveSoon();
+		}
+	}
+
+	views() {
+		const out = [];
+		this.app.workspace.iterateAllLeaves((leaf) => {
+			if (leaf.view instanceof MarkdownView) out.push(leaf.view);
+		});
+		return out;
+	}
+
+	viewOf(host) {
+		return this.views().find((v) => v.contentEl === host) || null;
+	}
+
+	// The level a note should be at: its own (Zoom each note separately) or the shared one. 100 is normal.
+	levelFor(view) {
+		const path = view && view.file && view.file.path;
+		const own = this.s.zoomPerNote === true;
+		return this.clamp(own ? (path && this.s.zoomNotes[path]) || 100 : this.s.zoomPct);
+	}
+
+	// Remembers a level (and saves it a moment later).
+	remember(view, level) {
+		const path = view && view.file && view.file.path;
+		if (this.s.zoomPerNote === true) {
+			if (!path) return;
+			if (level === 100) delete this.s.zoomNotes[path];
+			else this.s.zoomNotes[path] = level;
+			const keys = Object.keys(this.s.zoomNotes);
+			if (keys.length > 500) delete this.s.zoomNotes[keys[0]]; // the list stays small: the oldest goes
+		} else {
+			this.s.zoomPct = level;
+		}
+		this.plugin.saveDirty = true;
+		this.plugin.saveSoon();
+	}
+
+	moved(from, to) {
+		const map = this.s.zoomNotes;
+		if (!from || !map || map[from] === undefined) return;
+		if (to) map[to] = map[from];
+		delete map[from];
+		this.plugin.saveDirty = true;
+		this.plugin.saveSoon();
+	}
+
+	queueApply() {
+		if (this.applyRaf || !this.on) return;
+		this.applyRaf = window.requestAnimationFrame(() => {
+			this.applyRaf = 0;
+			if (this.on) this.applyAll();
+		});
+	}
+
+	applyAll() {
+		for (const view of this.views()) this.applyTo(view, this.levelFor(view));
+	}
+
+	// Puts a note at a level: at 100 every trace is removed. Returns true when something changed.
+	applyTo(view, level) {
+		const el = view && view.contentEl;
+		if (!el) return false;
+		const now = el.classList.contains('nm-zoomed') ? el.style.getPropertyValue('--nm-zoom') : '';
+		if (level === 100) {
+			if (!now) return false;
+			el.classList.remove('nm-zoomed');
+			el.style.removeProperty('--nm-zoom');
+		} else {
+			const v = String(level / 100);
+			if (now === v) return false;
+			el.classList.add('nm-zoomed');
+			el.style.setProperty('--nm-zoom', v);
+		}
+		const cm = view.editor && view.editor.cm;
+		if (cm && typeof cm.requestMeasure === 'function') cm.requestMeasure(); // the editor measures its text again
+		return true;
+	}
+
+	// ----- keeping the place under the fingers ------------------------------------------------------------------
+
+	// Notes what is at the point (x, y) of the screen: in the editor the line (by the editor's own layout, which also knows
+	// lines that are not drawn), in reading view the block of text, and failing both the same fraction of the note.
+	anchorAt(view, x, y) {
+		const sc = this.plugin.findScroller(view);
+		if (!sc) return null;
+		const a = { sc, y };
+		const cm = view.editor && view.editor.cm;
+		try {
+			if (view.getMode() !== 'preview' && cm && typeof cm.posAtCoords === 'function' && typeof cm.lineBlockAt === 'function') {
+				const pos = cm.posAtCoords({ x, y }, false);
+				if (pos !== null && pos !== undefined) {
+					const blk = cm.lineBlockAt(pos);
+					a.cm = cm;
+					a.pos = pos;
+					a.f = blk.height ? (y - (cm.documentTop + blk.top)) / blk.height : 0;
+					return a;
+				}
+			}
+			const hit = document.elementFromPoint(x, y);
+			const blk = hit && hit.closest ? hit.closest('.markdown-preview-section > *, .cm-line') : null;
+			if (blk && sc.contains(blk)) {
+				const r = blk.getBoundingClientRect();
+				a.el = blk;
+				a.f = r.height ? (y - r.top) / r.height : 0;
+				return a;
+			}
+		} catch (e) {
+			/* the fraction below */
+		}
+		const top = sc.getBoundingClientRect().top;
+		a.rel = y - top;
+		a.frac = sc.scrollHeight ? (sc.scrollTop + a.rel) / sc.scrollHeight : 0;
+		return a;
+	}
+
+	// After the text changed size: scrolls so that what was at the anchor is at (y) again.
+	holdAnchor(a, y) {
+		if (!a) return;
+		const sc = a.sc;
+		try {
+			let now;
+			if (a.cm) {
+				a.cm.measure(); // heights of the lines, measured at the new size, right now
+				const blk = a.cm.lineBlockAt(a.pos);
+				now = a.cm.documentTop + blk.top + a.f * blk.height;
+			} else if (a.el) {
+				if (!a.el.isConnected) return;
+				const r = a.el.getBoundingClientRect();
+				now = r.top + a.f * r.height;
+			} else {
+				sc.scrollTop = a.frac * sc.scrollHeight - (y - sc.getBoundingClientRect().top);
+				return;
+			}
+			const d = now - y;
+			if (Math.abs(d) >= 0.5) sc.scrollTop += d;
+		} catch (e) {
+			/* the text keeps its size and the scroll stays where it is */
+		}
+	}
+
+	// Puts the note (and, with one shared zoom, every open note) at a level. Returns true when something changed.
+	applyLevel(view, level) {
+		const targets = this.s.zoomPerNote !== true ? this.views() : [view];
+		let changed = false;
+		for (const v of targets) changed = this.applyTo(v, level) || changed;
+		return changed;
+	}
+
+	// Zooms a note to a level, keeping the point (x, y) fixed. Used by the commands.
+	zoomTo(view, level, x, y) {
+		level = this.clamp(level);
+		const a = this.anchorAt(view, x, y);
+		if (this.applyLevel(view, level)) this.holdAnchor(a, y);
+		return level;
+	}
+
+	// ----- the pinch --------------------------------------------------------------------------------------------
+
+	touchStart(e) {
+		if (e.touches.length !== 2) {
+			if (this.g && e.touches.length > 2) this.endPinch(true); // a third finger: the pinch is over
+			return;
+		}
+		if (this.g) this.endPinch(true);
+		const a = e.touches[0];
+		const b = e.touches[1];
+		const ta = a.target instanceof Element ? a.target : null;
+		const tb = b.target instanceof Element ? b.target : null;
+		if (!ta || !tb || ta.closest(ZOOM_SKIP) || tb.closest(ZOOM_SKIP)) return;
+		const hostA = ta.closest('.view-content');
+		if (!hostA || hostA !== tb.closest('.view-content')) return;
+		const view = this.viewOf(hostA);
+		if (!view) return;
+		const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+		if (dist < 10) return;
+		const x = (a.clientX + b.clientX) / 2;
+		const y = (a.clientY + b.clientY) / 2;
+		const level = this.levelFor(view);
+		this.g = {
+			view,
+			dist,
+			start: level,
+			level,
+			x,
+			y,
+			raf: 0,
+			anchor: this.anchorAt(view, x, y), // what is under the fingers now, and stays under them however the text changes
+			quiet: this.plugin.bookmarks ? this.plugin.bookmarks.quietNav() : () => {}, // Obsidian's bars ignore this scrolling
+		};
+		if (e.cancelable) e.preventDefault(); // the page must not start scrolling or zooming itself
+		this.showPill(this.g.level, view);
+	}
+
+	touchMove(e) {
+		const g = this.g;
+		if (!g) return;
+		if (e.touches.length < 2) return;
+		if (e.cancelable) e.preventDefault();
+		const a = e.touches[0];
+		const b = e.touches[1];
+		const dist = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+		g.x = (a.clientX + b.clientX) / 2;
+		g.y = (a.clientY + b.clientY) / 2;
+		g.next = this.clamp(g.start * (dist / g.dist));
+		if (!g.raf) g.raf = window.requestAnimationFrame(() => this.frame());
+	}
+
+	// One step per screen frame, however many touch events came: the text is resized once.
+	frame() {
+		const g = this.g;
+		if (!g) return;
+		g.raf = 0;
+		if (g.next === undefined) return;
+		const level = g.next;
+		if (level !== g.level) {
+			this.applyLevel(g.view, level);
+			g.level = level;
+			this.showPill(level);
+		}
+		this.holdAnchor(g.anchor, g.y); // the point stays under the fingers, which also lets two fingers moving together scroll
+	}
+
+	touchEnd(e) {
+		if (!this.g) return;
+		if (e.touches && e.touches.length >= 2) return;
+		this.endPinch(true);
+	}
+
+	// Finishes the pinch: the last size is applied and remembered, and the bars are handed back to Obsidian a moment later.
+	endPinch(save) {
+		const g = this.g;
+		if (!g) return;
+		this.g = null;
+		if (g.raf) window.cancelAnimationFrame(g.raf);
+		if (save && g.next !== undefined && g.next !== g.level) {
+			this.applyLevel(g.view, g.next);
+			g.level = g.next;
+			this.holdAnchor(g.anchor, g.y);
+		}
+		if (save) this.remember(g.view, g.level);
+		this.hidePill(900);
+		window.setTimeout(g.quiet, 300);
+	}
+
+	// ----- commands ---------------------------------------------------------------------------------------------
+
+	// Zoom in / out by a step, or back to normal (to === 100), around the middle of the note on the screen.
+	step(delta, to) {
+		if (!this.on) {
+			new Notice('Note zoom is off. Turn it on in Settings > My Note Minimap > Note zoom.');
+			return;
+		}
+		const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+		if (!view) {
+			new Notice('Open a note first.');
+			return;
+		}
+		const sc = this.plugin.findScroller(view);
+		const r = sc ? sc.getBoundingClientRect() : { left: 0, top: 0, width: window.innerWidth, height: window.innerHeight };
+		const now = this.levelFor(view);
+		const next = to !== undefined ? to : Math.round((now + delta) / ZOOM_STEP) * ZOOM_STEP;
+		const level = this.zoomTo(view, next, r.left + r.width / 2, r.top + r.height / 2);
+		this.remember(view, level);
+		this.showPill(level, view);
+		this.hidePill(900);
+	}
+
+	// ----- the percent pill -------------------------------------------------------------------------------------
+
+	showPill(level, view) {
+		if (this.s.zoomShow === false) return;
+		window.clearTimeout(this.pillTimer);
+		if (!this.pill || !this.pill.isConnected) {
+			this.pill = document.body.createDiv({ cls: 'nm-zoom-pill' });
+			this.pill.setAttribute('aria-hidden', 'true');
+		}
+		this.pill.textContent = level + '%';
+		this.placePill(view || (this.g && this.g.view) || this.app.workspace.getActiveViewOfType(MarkdownView));
+		this.pill.classList.add('nm-show');
+	}
+
+	// The pill sits just below the note's top bar, wherever that bar is. Its height and its distance from the top of the screen
+	// differ between phones and themes, and with Full Screen Guard (experimental) the camera's space is held clear above it, which a
+	// fixed distance cannot know. So the bar is measured: the pill goes 10 px under its bottom edge (or under the Find bar when that
+	// is open), and never higher than the safe space at the top of the screen, which is where it stays when the bar slides away.
+	placePill(view) {
+		const pill = this.pill;
+		if (!pill) return;
+		let bottom = 0;
+		try {
+			const root = view && view.containerEl;
+			const bar = root && root.querySelector('.view-header');
+			if (bar && bar.offsetHeight) bottom = bar.getBoundingClientRect().bottom;
+			const find = root && root.querySelector('.document-search-container');
+			if (find && find.offsetHeight) bottom = Math.max(bottom, find.getBoundingClientRect().bottom);
+		} catch (e) {
+			/* the safe space below is still used */
+		}
+		// The safe space is read when the pill starts to show, not again on every step of a pinch.
+		if (!pill.classList.contains('nm-show') || this.pillInset === undefined) {
+			try {
+				this.pillInset = (this.plugin.readSafeInsets && this.plugin.readSafeInsets().top) || 0; // includes what Full Screen Guard holds clear
+			} catch (e) {
+				this.pillInset = 0;
+			}
+		}
+		const y = Math.round(Math.max(bottom, this.pillInset) + 10);
+		if (pill.dataset.top !== String(y)) {
+			pill.dataset.top = String(y);
+			pill.style.top = y + 'px';
+		}
+	}
+
+	hidePill(ms) {
+		window.clearTimeout(this.pillTimer);
+		this.pillTimer = window.setTimeout(() => {
+			if (this.pill) this.pill.classList.remove('nm-show');
+		}, ms);
+	}
+}
+
 class NoteMinimapPlugin extends Plugin {
 	// Adds or removes the style tag that hides Obsidian's native scrollbar, following the setting.
 	applyNativeScrollbar() {
@@ -2311,6 +2926,20 @@ class NoteMinimapPlugin extends Plugin {
 			if (saved.height === 60) this.settings.height = DEFAULTS.height;
 		}
 		// Full Screen Guard (experimental): off unless it was switched on, and every value kept inside its range.
+		this.settings.zoomOn = this.settings.zoomOn === true;
+		this.settings.zoomPerNote = this.settings.zoomPerNote === true;
+		this.settings.zoomShow = this.settings.zoomShow !== false;
+		this.settings.zoomMin = Math.max(25, Math.min(100, Math.round(Number(this.settings.zoomMin)) || DEFAULTS.zoomMin));
+		this.settings.zoomMax = Math.max(100, Math.min(500, Math.round(Number(this.settings.zoomMax)) || DEFAULTS.zoomMax));
+		this.settings.zoomPct = Math.max(this.settings.zoomMin, Math.min(this.settings.zoomMax, Math.round(Number(this.settings.zoomPct)) || 100));
+		const zn = this.settings.zoomNotes;
+		this.settings.zoomNotes = {};
+		if (zn && typeof zn === 'object') {
+			for (const k of Object.keys(zn).slice(-500)) {
+				const v = Math.round(Number(zn[k]));
+				if (typeof k === 'string' && v >= 25 && v <= 500 && v !== 100) this.settings.zoomNotes[k] = v;
+			}
+		}
 		this.settings.searchFind = this.settings.searchFind === true;
 		this.settings.taOn = this.settings.taOn === true;
 		this.settings.taWrap = this.settings.taWrap !== false;
@@ -2322,6 +2951,12 @@ class NoteMinimapPlugin extends Plugin {
 		this.settings.fsgForce = this.settings.fsgForce !== false;
 		this.settings.fsgKeepAuto = this.settings.fsgKeepAuto !== false;
 		if (!FSG_CAMERA_EDGES.includes(this.settings.fsgCameraEdge)) this.settings.fsgCameraEdge = DEFAULTS.fsgCameraEdge;
+		this.settings.fsgAuto = this.settings.fsgAuto !== false;
+		{
+			const fl = this.settings.fsgLearned;
+			const num = (v) => Math.max(0, Math.min(160, Math.round((Number(v) || 0) * 10) / 10));
+			this.settings.fsgLearned = { top: num(fl && fl.top), side: num(fl && fl.side), tried: !!(fl && fl.tried) };
+		}
 		this.settings.fsgPadding = Math.min(120, Math.max(0, Math.round(Number(this.settings.fsgPadding) || 0)));
 		this.settings.ver = 13;
 		this.states = new Map();
@@ -2353,6 +2988,13 @@ class NoteMinimapPlugin extends Plugin {
 				window.setTimeout(kbRememberView, 450);
 			});
 		}
+
+		// Note zoom: pinch a note to change its text size. Nothing is listening while the setting is off (it is off by default).
+		this.noteZoom = new NoteZoom(this);
+		this.app.workspace.onLayoutReady(() => this.noteZoom.ready());
+		this.addCommand({ id: 'note-zoom-in', name: 'Zoom note in', callback: () => this.noteZoom.step(ZOOM_STEP) });
+		this.addCommand({ id: 'note-zoom-out', name: 'Zoom note out', callback: () => this.noteZoom.step(-ZOOM_STEP) });
+		this.addCommand({ id: 'note-zoom-reset', name: 'Reset note zoom', callback: () => this.noteZoom.step(0, 100) });
 
 		// Search button opens Find: a tap on the bottom bar's search button searches the note. Off by default.
 		this.searchFind = new SearchFind(this);
@@ -2486,6 +3128,11 @@ class NoteMinimapPlugin extends Plugin {
 			}, 8000);
 		});
 		this.addCommand({ id: 'pull-nothing', name: 'Do nothing (pull-down action)', callback: () => {} });
+		this.addCommand({
+			id: 'open-setup',
+			name: 'Open setup (refresh rate and full screen)',
+			callback: () => new RefreshRateModal(this.app, this, null, false, Platform.isMobileApp).open(),
+		});
 		this.app.workspace.onLayoutReady(() => this.keepQuickActionOff());
 		this.blockPullDown();
 		this.app.workspace.onLayoutReady(() => {
@@ -2493,7 +3140,7 @@ class NoteMinimapPlugin extends Plugin {
 			if (!Platform.isMobile || this.settings.refreshAsked) return;
 			this._askTimer = window.setTimeout(() => {
 				this._askTimer = null;
-				if (!this._unloaded && !this.settings.refreshAsked) new RefreshRateModal(this.app, this, null, true).open();
+				if (!this._unloaded && !this.settings.refreshAsked) new RefreshRateModal(this.app, this, null, true, true).open();
 			}, 250);
 		});
 
@@ -2815,6 +3462,7 @@ class NoteMinimapPlugin extends Plugin {
 		if (this.bookmarks) this.bookmarks.stop();
 		if (this.tabArrows) this.tabArrows.stop();
 		if (this.searchFind) this.searchFind.stop();
+		if (this.noteZoom) this.noteZoom.stop();
 		this.applyNativeScrollbar();
 		this.removeStartHook();
 		for (const st of this.states.values()) this.ungateRender(st, true);
@@ -3932,6 +4580,7 @@ class NoteMinimapPlugin extends Plugin {
 		if (this.bookmarks) this.bookmarks.sync();
 		if (this.tabArrows) this.tabArrows.sync();
 		if (this.searchFind) this.searchFind.sync();
+		if (this.noteZoom) this.noteZoom.sync();
 		if (this.guard) this.guard.syncSoon(); // Full Screen Guard: start or stop at once, apply a changed value after a pause (nothing while it is off)
 		if (this.settings.animateBars && this._barsCls) this.applyBarsLook(); // speed / style of the bars' slide (also after a reset)
 		this.queueFrameRefresh();
@@ -6497,13 +7146,29 @@ class NoteMinimapPlugin extends Plugin {
 	}
 }
 
+// The pop-up that appears by itself the first time the plugin is used (and again from Settings > Screen refresh rate > Open setup):
+// step 1 asks for or measures the screen's refresh rate; step 2, below it in the same scrolling pop-up, asks whether to use the
+// full screen experience (Full Screen Guard) and lets the plugin find the space for the camera, with the slider to adjust it.
+// Opened from Settings > Measure it holds step 1 only.
 class RefreshRateModal extends Modal {
-	constructor(app, plugin, onDone, firstRun) {
+	constructor(app, plugin, onDone, firstRun, full) {
 		super(app);
 		this.plugin = plugin;
 		this.onDone = onDone;
 		this.firstRun = !!firstRun; // true only for the pop-up that appears by itself the first time
+		this.full = !!full && Platform.isMobileApp; // both steps (the status bar belongs to the phone app, not to desktop)
 		this.stop = null;
+		this.timers = new Set();
+		this.step2 = null;
+	}
+
+	later(fn, ms) {
+		const t = window.setTimeout(() => {
+			this.timers.delete(t);
+			fn();
+		}, ms);
+		this.timers.add(t);
+		return t;
 	}
 
 	onOpen() {
@@ -6515,19 +7180,26 @@ class RefreshRateModal extends Modal {
 		this.closing = false;
 		if (this.containerEl) this.containerEl.addClass('nm-hz-container');
 		if (this.modalEl) this.modalEl.addClass('nm-hz-box');
-		contentEl.createEl('h3', { text: 'What is your screen refresh rate?' });
-		contentEl.createEl('p', {
+		// With two steps the pop-up scrolls: step 1 is the first screen, step 2 is below it.
+		const s1 = this.full ? contentEl.createDiv({ cls: 'nm-setup-step nm-setup-step1' }) : contentEl;
+		contentEl.toggleClass('nm-setup', this.full);
+		if (this.full) {
+			s1.createEl('h2', { text: 'Set up My Note Minimap', cls: 'nm-setup-title' });
+			s1.createEl('p', { cls: 'nm-hz-note', text: 'Two quick steps. You can change everything later in the plugin settings.' });
+		}
+		s1.createEl('h3', { text: this.full ? 'Step 1 of 2: your screen refresh rate' : 'What is your screen refresh rate?' });
+		s1.createEl('p', {
 			text: 'Arrow scrolling is timed to your screen so every redraw moves the note by the same, whole number of pixels. Most phones are 60 Hz; many newer ones are 90 or 120 Hz. Pick yours, or let the plugin measure it.',
 		});
-		this.status = contentEl.createDiv({ cls: 'nm-hz-status' });
+		this.status = s1.createDiv({ cls: 'nm-hz-status' });
 		this.showCurrent();
-		this.pad = contentEl.createDiv({ cls: 'nm-hz-pad' });
+		this.pad = s1.createDiv({ cls: 'nm-hz-pad' });
 		this.pad.createDiv({ cls: 'nm-hz-hint', text: 'Measure: tap the button, then keep a finger moving on this box' });
 		this.dot = this.pad.createDiv({ cls: 'nm-hz-dot' });
 		this.result = this.pad.createDiv({ cls: 'nm-hz-result' });
 		this.progress = this.pad.createDiv({ cls: 'nm-hz-progress' });
 
-		const row = contentEl.createDiv({ cls: 'nm-hz-row' });
+		const row = s1.createDiv({ cls: 'nm-hz-row' });
 		const measure = row.createEl('button', { text: 'Measure', cls: 'mod-cta' });
 		measure.addEventListener('click', () => this.measure(measure));
 		this.choices = new Map(); // refresh rate -> its button, so the current one can be marked
@@ -6540,9 +7212,134 @@ class RefreshRateModal extends Modal {
 		auto.addEventListener('click', () => this.choose(0));
 		this.choices.set(0, auto);
 		this.showCurrent();
-		contentEl.createEl('p', {
+		s1.createEl('p', {
 			cls: 'nm-hz-note',
 			text: 'Not sure? Leave it on Automatic. You can change this any time under Settings → My Note Minimap → Screen refresh rate.',
+		});
+		if (this.full) {
+			const next = s1.createEl('button', { text: 'Next: full screen  ↓', cls: 'nm-setup-next' });
+			next.addEventListener('click', () => this.next());
+			this.step2 = contentEl.createDiv({ cls: 'nm-setup-step nm-setup-step2' });
+			this.buildFullScreen(this.step2);
+		}
+	}
+
+	// ----- step 2: the full screen experience ----------------------------------------------------------------------
+
+	// Scrolls the pop-up down to step 2.
+	next() {
+		if (!this.step2 || !this.step2.isConnected) return;
+		const reduced = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+		this.step2.scrollIntoView({ behavior: reduced ? 'auto' : 'smooth', block: 'start' });
+	}
+
+	buildFullScreen(box) {
+		const p = this.plugin;
+		box.createEl('h3', { text: 'Step 2 of 2: full screen experience' });
+		box.createEl('p', {
+			text: 'Do you want a full screen experience? Android\'s status bar is hidden, so notes use the whole screen, and the plugin keeps notes and Obsidian\'s bars clear of the camera cutout.',
+		});
+		new Setting(box)
+			.setName('Full screen experience')
+			.setDesc('Experimental. You can turn it off any time under Settings → My Note Minimap → Experimental → Full Screen Guard.')
+			.addToggle((t) =>
+				t.setValue(p.settings.fsgEnabled === true).onChange(async (v) => {
+					p.settings.fsgEnabled = v;
+					await p.saveSettings();
+					if (p.guard) p.guard.sync(); // started (or stopped) at once, not after the pause of the settings save
+					this.fullOpen(v);
+					this.showUsed();
+					if (v) this.detect(); // the space for the camera is found right away; the button below does it again
+				})
+			);
+		this.fsFold = box.createDiv({ cls: 'nm-setup-fold' });
+		this.fsFold.toggleClass('nm-setup-open', p.settings.fsgEnabled === true);
+		const inner = this.fsFold.createDiv({ cls: 'nm-setup-fold-inner' });
+		this.fsStatus = inner.createDiv({ cls: 'nm-hz-status' });
+		const row = inner.createDiv({ cls: 'nm-hz-row' });
+		this.detectBtn = row.createEl('button', { text: 'Detect automatically', cls: 'mod-cta' });
+		this.detectBtn.addEventListener('click', () => this.detect());
+		inner.createEl('p', {
+			cls: 'nm-hz-note',
+			text: 'Finds the space the status bar and camera take, on any phone. The status bar flashes for a moment while it measures.',
+		});
+		// The same slider as in the settings: − and + buttons, a number, a glide and a reset button.
+		const tab = Object.create(MinimapSettingTab.prototype);
+		tab.plugin = p;
+		const comps = {};
+		this.sliderRow = tab.withReset(
+			new Setting(inner)
+				.setName('Keep at least this much space clear (px)')
+				.setDesc('If the notes or the bars are not yet clear of the camera cutout, raise this until they are. 0 means no minimum of your own.')
+				.addSlider((sl) => {
+					comps.fsgPadding = sl;
+					const apply = async (v) => {
+						const on = Math.round(Number(v));
+						p.settings.fsgPadding = Math.min(120, Math.max(0, on));
+						await p.saveSettings();
+						this.later(() => this.showUsed(), 450); // the guard applies the new space a moment after the save
+					};
+					sl.setLimits(0, 120, 1).setValue(p.settings.fsgPadding || 0).onChange(apply);
+					tab.addFineControls(sl, 0, 120, 1, apply);
+				}),
+			['fsgPadding'],
+			comps
+		);
+		this.fsUsed = inner.createDiv({ cls: 'nm-hz-status' });
+		inner.createEl('p', {
+			cls: 'nm-hz-note',
+			text: 'Your notes stay where they are while you adjust: the space is applied as you move the slider.',
+		});
+		const done = box.createDiv({ cls: 'nm-hz-row nm-setup-done' });
+		const btn = done.createEl('button', { text: 'Done', cls: 'mod-cta' });
+		btn.addEventListener('click', () => this.close());
+		this.showUsed();
+	}
+
+	fullOpen(on) {
+		if (this.fsFold) this.fsFold.toggleClass('nm-setup-open', !!on);
+		if (on) this.later(() => this.fsFold && this.fsFold.scrollIntoView({ behavior: 'smooth', block: 'nearest' }), 280);
+	}
+
+	// What is known right now: the space found, and the space in use on the camera's edge.
+	showUsed() {
+		const p = this.plugin;
+		const g = p.guard;
+		if (!this.fsUsed) return;
+		if (!p.settings.fsgEnabled || !g || !g.running) {
+			this.fsUsed.setText(p.settings.fsgEnabled ? 'Starting…' : 'Full screen is off.');
+			return;
+		}
+		const fmt = (n) => Math.round(n * 10) / 10 + ' px';
+		const used = g.spaceFor(g.cameraSide(), g.measure());
+		const L = p.settings.fsgLearned || {};
+		const found = Math.max(L.top || 0, L.side || 0);
+		this.fsUsed.setText(
+			'Space kept clear on the camera edge: ' + fmt(used) + (found > 0 ? ' (found for this phone: ' + fmt(found) + ').' : p.settings.fsgAuto && L.tried ? ' (an estimate: nothing could be measured).' : '.')
+		);
+	}
+
+	// Measures the space for the camera (see FullScreenGuard.probe) and says what it found.
+	detect() {
+		const g = this.plugin.guard;
+		if (!g || !g.running) {
+			if (this.fsStatus) this.fsStatus.setText('Turn the full screen experience on first.');
+			return;
+		}
+		if (this.detecting) return;
+		this.detecting = true;
+		if (this.detectBtn) this.detectBtn.disabled = true;
+		this.fsStatus.setText('Measuring: the status bar will flash for a moment…');
+		g.redetect((found) => {
+			this.detecting = false;
+			if (!this.detectBtn || !this.detectBtn.isConnected) return;
+			this.detectBtn.disabled = false;
+			this.fsStatus.setText(
+				found > 0
+					? 'Found ' + Math.round(found * 10) / 10 + ' px for the camera and status bar.'
+					: 'Nothing could be measured, so the standard ' + FSG_ESTIMATE + ' px status bar height is used. Raise the slider below if the bars still touch the camera.'
+			);
+			this.later(() => this.showUsed(), 500);
 		});
 	}
 
@@ -6568,7 +7365,12 @@ class RefreshRateModal extends Modal {
 		this.plugin.settings.refreshRate = hz;
 		this.plugin.settings.refreshAsked = true;
 		await this.plugin.saveSettings();
-		this.close();
+		if (this.full) {
+			this.showCurrent();
+			this.next(); // on to step 2
+		} else {
+			this.close();
+		}
 	}
 
 	// Counts how long frames really take while a finger is on the pad. Phones with adaptive refresh drop to a
@@ -6630,6 +7432,7 @@ class RefreshRateModal extends Modal {
 			this.result.setText(hz + ' Hz');
 			pad.addClass('nm-hz-done');
 			if (this.choices) for (const [k, b] of this.choices) b.toggleClass('nm-hz-current', k === hz);
+			if (this.full) this.later(() => this.next(), 1300); // the result is seen first, then on to step 2
 		};
 		this.stop = () => end(false);
 
@@ -6650,6 +7453,8 @@ class RefreshRateModal extends Modal {
 
 	async onClose() {
 		if (this.stop) this.stop();
+		for (const t of this.timers) window.clearTimeout(t);
+		this.timers.clear();
 		this.contentEl.empty();
 		if (!this.plugin.settings.refreshAsked) {
 			this.plugin.settings.refreshAsked = true;
@@ -6992,6 +7797,11 @@ class MinimapSettingTab extends PluginSettingTab {
 				.addSlider((sl) => {
 					comps[key] = sl;
 					const apply = async (v) => {
+						// A slider that is gliding has no step for a moment, and a value caught then (99.99853…) must not be saved:
+						// every value is put back on the slider's own steps first.
+						const dec = step < 1 ? (String(step).split('.')[1] || '').length : 0;
+						const on = Math.round((Number(v) - min) / step) * step + min;
+						v = Math.min(max, Math.max(min, Number(on.toFixed(dec))));
 						p.settings[key] = v;
 						if (adjust) adjust(v);
 						await p.saveSettings();
@@ -7291,6 +8101,12 @@ class MinimapSettingTab extends PluginSettingTab {
 						}).open();
 					})
 				);
+			if (Platform.isMobileApp) {
+				new Setting(containerEl)
+					.setName('Setup')
+					.setDesc('Opens the first-time setup again: the refresh rate, then the full screen experience with automatic detection of the camera space.')
+					.addButton((b) => b.setButtonText('Open setup').onClick(() => new RefreshRateModal(this.app, p, null, false, true).open()));
+			}
 		}
 
 		new Setting(containerEl)
@@ -7406,6 +8222,56 @@ class MinimapSettingTab extends PluginSettingTab {
 					t.setValue(p.settings.taDebug === true).onChange(async (v) => {
 						p.settings.taDebug = v;
 						await p.saveSettings();
+					})
+				);
+		}
+
+		// ---- Note zoom ----
+		// Off by default. The rows sit in a fold, like the other groups.
+		host = containerEl;
+		new Setting(containerEl).setName('Note zoom').setHeading();
+		const zoomOn = p.settings.zoomOn === true;
+		new Setting(containerEl)
+			.setName('Pinch to zoom notes')
+			.setDesc('Off by default. Pinch with two fingers on a note to make its text bigger or smaller (phone and tablet). The text reflows as you pinch and the place under your fingers stays put. Only the note is scaled: Obsidian\'s menus and bars keep their size. The zoom is remembered, and there are commands to zoom in, zoom out and reset for the command palette.')
+			.addToggle((t) =>
+				t.setValue(zoomOn).onChange(async (v) => {
+					p.settings.zoomOn = v;
+					this.setFold(zoomFold.wrap, v);
+					await p.saveSettings();
+				})
+			);
+		const zoomFold = fold(zoomOn);
+		{
+			new Setting(zoomFold.inner)
+				.setName('Zoom each note separately')
+				.setDesc('Off: one zoom for every note. On: each note remembers its own zoom (a table-heavy note can be small while prose is large).')
+				.addToggle((t) =>
+					t.setValue(p.settings.zoomPerNote === true).onChange(async (v) => {
+						p.settings.zoomPerNote = v;
+						await p.saveSettings();
+					})
+				);
+			new Setting(zoomFold.inner)
+				.setName('Show zoom percent')
+				.setDesc('A small pill with the percent while you zoom.')
+				.addToggle((t) =>
+					t.setValue(p.settings.zoomShow !== false).onChange(async (v) => {
+						p.settings.zoomShow = v;
+						await p.saveSettings();
+					})
+				);
+			slider('Smallest zoom', 'How far a note can be made smaller, in percent. 100 (the default) is the normal size: notes can only be made bigger. Lower it to allow smaller text.', 'zoomMin', 25, 100, 5, undefined, zoomFold.inner);
+			slider('Largest zoom', 'How far a note can be made bigger, in percent.', 'zoomMax', 100, 500, 10, undefined, zoomFold.inner);
+			new Setting(zoomFold.inner)
+				.setName('Reset every note to 100%')
+				.setDesc('Puts the shared zoom and every note\'s own zoom back to the normal size.')
+				.addButton((b) =>
+					b.setButtonText('Reset zoom').onClick(async () => {
+						p.settings.zoomPct = 100;
+						p.settings.zoomNotes = {};
+						await p.saveSettings();
+						new Notice('Zoom reset to 100%.');
 					})
 				);
 		}
@@ -7560,9 +8426,20 @@ class MinimapSettingTab extends PluginSettingTab {
 						})
 				);
 
+			new Setting(guardFold.inner)
+				.setName('Detect the space automatically')
+				.setDesc("On by default. Finds how much space the camera needs, on any phone: it remembers whatever Android reports (even for a moment), and if Android never reports one, the status bar is shown briefly, once, to read it, then hidden again. Turn it off to use only the slider below.")
+				.addToggle((t) =>
+					t.setValue(p.settings.fsgAuto !== false).onChange(async (v) => {
+						p.settings.fsgAuto = v;
+						await p.saveSettings();
+						guardReadout(true);
+					})
+				);
+
 			slider(
-				'Keep this much space clear (px)',
-				'The least space kept free on the camera edge. 0 uses only what Android reports, which is right when Android already reports the cutout. If notes or bars still touch the camera, raise this until they clear it. The space is never added twice: the larger of this number and what Android reports is used.',
+				'Keep at least this much space clear (px)',
+				'A minimum on the camera edge, for when the automatic space is not enough or detection is off. 0 means no minimum of your own. The space is never added twice: the largest of this number, the automatic space and what Android reports now is used. If notes or bars still touch the camera, raise this until they clear it.',
 				'fsgPadding',
 				0,
 				120,
@@ -7573,7 +8450,26 @@ class MinimapSettingTab extends PluginSettingTab {
 
 			readoutRow = new Setting(guardFold.inner)
 				.setName('What Android reports right now')
-				.addButton((b) => b.setButtonText('Refresh').onClick(() => guardReadoutNow()));
+				.addButton((b) => b.setButtonText('Refresh').onClick(() => guardReadoutNow()))
+				.addButton((b) =>
+					b.setButtonText('Detect again').onClick(() => {
+						if (!p.guard) return;
+						if (!p.guard.running) {
+							new Notice('Turn Full Screen Guard on first.');
+							return;
+						}
+						new Notice('Measuring: the status bar will flash for a moment.', 2500);
+						p.guard.redetect((found) => {
+							guardReadoutNow();
+							new Notice(
+								found > 0
+									? 'Camera space found: ' + Math.round(found * 10) / 10 + ' px.'
+									: 'Nothing could be measured, so the standard ' + FSG_ESTIMATE + ' px estimate is used. Raise the slider if the bars still touch the camera.',
+								6000
+							);
+						});
+					})
+				);
 			guardReadoutNow();
 		}
 	}
@@ -8161,6 +9057,7 @@ NoteMinimapPlugin.FullScreenGuard = FullScreenGuard;
 NoteMinimapPlugin.PageBookmarks = PageBookmarks;
 NoteMinimapPlugin.TabArrows = TabArrows;
 NoteMinimapPlugin.SearchFind = SearchFind;
+NoteMinimapPlugin.NoteZoom = NoteZoom;
 module.exports = NoteMinimapPlugin;
 
 /* nosourcemap */

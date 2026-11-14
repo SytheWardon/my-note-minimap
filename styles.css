@@ -1203,6 +1203,61 @@ html body.nm-animate-bars.is-hidden-nav.is-phone.is-floating-nav .mod-root .work
 	.modal-container.nm-hz-container.nm-hz-closing .modal.nm-hz-box { animation: none; }
 }
 
+/* First-run setup: the refresh-rate pop-up with a second step below it (the full screen experience). The pop-up scrolls; each step
+   is about one screen tall, so scrolling or the Next button moves from one to the other. */
+.nm-hz-modal.nm-setup {
+	max-height: min(82vh, 720px);
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	scroll-snap-type: y proximity;
+	scroll-padding-top: 4px;
+}
+.nm-hz-modal .nm-setup-step {
+	scroll-snap-align: start;
+}
+.nm-hz-modal .nm-setup-step2 {
+	margin-top: 22px;
+	padding-top: 16px;
+	border-top: 1px solid var(--background-modifier-border);
+}
+.nm-hz-modal .nm-setup-title {
+	margin: 0 0 4px;
+}
+.nm-hz-modal button.nm-setup-next {
+	display: block;
+	width: 100%;
+	margin-top: 12px;
+}
+.nm-hz-modal .nm-setup-done {
+	margin-top: 16px;
+}
+.nm-hz-modal .nm-setup-done button {
+	flex: 1;
+}
+/* The part of step 2 that appears when the full screen experience is switched on: it opens downwards. */
+.nm-hz-modal .nm-setup-fold {
+	display: grid;
+	grid-template-rows: 0fr;
+	opacity: 0;
+	visibility: hidden;
+	transition: grid-template-rows 280ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 220ms ease, visibility 0s linear 280ms;
+}
+.nm-hz-modal .nm-setup-fold.nm-setup-open {
+	grid-template-rows: 1fr;
+	opacity: 1;
+	visibility: visible;
+	transition: grid-template-rows 280ms cubic-bezier(0.2, 0.8, 0.2, 1), opacity 220ms ease 40ms, visibility 0s;
+}
+.nm-hz-modal .nm-setup-fold-inner {
+	min-height: 0;
+	overflow: hidden;
+}
+@media (prefers-reduced-motion: reduce) {
+	.nm-hz-modal.nm-setup { scroll-behavior: auto; }
+	.nm-hz-modal .nm-setup-fold,
+	.nm-hz-modal .nm-setup-fold.nm-setup-open { transition: none; }
+}
+
 /* Refresh-rate question / measuring box */
 .nm-hz-modal .nm-hz-status { color: var(--text-muted); margin-bottom: 8px; min-height: 2.6em; }
 .nm-hz-modal .nm-hz-pad {
@@ -1708,6 +1763,65 @@ html body.nm-hold-lite.nm-hold-lite .workspace-tab-header-container {
 	-webkit-text-fill-color: var(--text-normal);
 	opacity: 1;
 	visibility: visible;
+}
+
+/* ---- Note zoom (see NoteZoom). The script puts nm-zoomed and --nm-zoom (1 = normal) on a note's view area, and only while the
+   zoom is not 100%. The note's text size is Obsidian's own size times that; headings and code are in em, so they follow. Tables and
+   checkboxes take their size from variables that are fixed on the page, so those are scaled here too. The body lines keep the value
+   Obsidian set (the user's font size, the theme's) as a starting point. ---- */
+body {
+	--nm-table-base: var(--table-text-size);
+	--nm-checkbox-base: var(--checkbox-size);
+}
+
+.nm-zoomed .markdown-source-view,
+.nm-zoomed .markdown-preview-view {
+	font-size: calc(var(--font-preferred-size) * var(--nm-zoom, 1));
+}
+
+.nm-zoomed {
+	--table-text-size: calc(var(--nm-table-base, var(--font-preferred-size)) * var(--nm-zoom, 1));
+	--checkbox-size: calc(var(--nm-checkbox-base, 1.15em) * var(--nm-zoom, 1));
+}
+
+/* The percent shown while zooming. */
+.nm-zoom-pill {
+	position: fixed;
+	left: 50%;
+	/* Only a first guess: the script puts the pill just below the note's top bar (see placePill). */
+	top: calc(var(--safe-area-inset-top, env(safe-area-inset-top, 0px)) + 76px);
+	z-index: 10000;
+	pointer-events: none;
+	opacity: 0;
+	visibility: hidden;
+	transform: translate(-50%, -6px) scale(0.96);
+	padding: 8px 18px;
+	border-radius: 999px;
+	font-size: var(--font-ui-medium, 16px);
+	font-variant-numeric: tabular-nums;
+	line-height: 1.2;
+	background: var(--background-primary-alt, #1e1e1e);
+	background: color-mix(in srgb, var(--background-primary-alt, #1e1e1e) 90%, transparent);
+	-webkit-backdrop-filter: blur(12px) saturate(1.2);
+	backdrop-filter: blur(12px) saturate(1.2);
+	color: var(--text-normal, #ddd);
+	border: 1px solid var(--background-modifier-border, #444);
+	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+	transition: opacity 180ms ease, transform 180ms ease, visibility 0s linear 180ms;
+}
+
+.nm-zoom-pill.nm-show {
+	opacity: 1;
+	visibility: visible;
+	transform: translate(-50%, 0) scale(1);
+	transition: opacity 120ms ease, transform 200ms cubic-bezier(0.22, 0.9, 0.25, 1), visibility 0s;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.nm-zoom-pill,
+	.nm-zoom-pill.nm-show {
+		transition: none;
+	}
 }
 
 /* ---- Tab arrows: the pill above the bottom bar saying which tab you moved to ("Tab 2 of 5") ----

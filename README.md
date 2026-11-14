@@ -9,6 +9,7 @@ An [Obsidian](https://obsidian.md) plugin that adds a scrollbar or a colour-code
 - **Arrow buttons** (scrollbar style): tap to jump to the next or previous heading, hold to keep scrolling.
 - **Page bubble:** while you scroll, a small bubble shows the page you are on, like *3 of 12*.
 - **Page vibration** on phones: a light buzz as you cross into a new page.
+- **Note zoom** (new in 6.6.0, off by default): pinch with two fingers on a note to make its text bigger or smaller, remembered.
 - **Search button opens Find** (new in 6.5.1, off by default): a tap on the bottom bar's search button opens Find in the note instead of the quick switcher.
 - **Tab arrows** (new in 6.5.0, off by default): the bottom bar's left and right arrows switch to the previous and next tab.
 - **Page bookmarks** (new in 6.4.4): long-press the search button to bookmark the page you are on and to open all your bookmarks, across every note and tab.
@@ -21,6 +22,15 @@ An [Obsidian](https://obsidian.md) plugin that adds a scrollbar or a colour-code
 
 - **From Obsidian:** Settings → Community plugins → Browse → search "My Note Minimap" → Install → Enable.
 - **By hand:** put `main.js`, `manifest.json` and `styles.css` from the latest [release](../../releases) into `<your vault>/.obsidian/plugins/my-note-minimap/`, then enable the plugin.
+
+## First-time setup
+
+The first time the plugin is used on a phone or tablet, one pop-up appears by itself. It scrolls, and has two steps:
+
+1. **Your screen refresh rate.** Pick 60, 90, 120 or 144 Hz, choose *Automatic*, or tap **Measure** and keep a finger moving on the box. When you have chosen or measured, the pop-up moves down to step 2 by itself (or tap **Next**).
+2. **Full screen experience.** Switch it on to hide Android's status bar and keep notes and Obsidian's bars clear of the camera cutout (this is Full Screen Guard, experimental). When it is on, the camera's space is **detected automatically** (the status bar flashes for a moment while it measures), and the **Detect automatically** button measures again. Below it is the same slider as in the settings, with − and + buttons, to adjust by hand if the notes or bars are not yet clear of the camera cutout; the line under it says how much space is kept clear. Tap **Done** when you are finished.
+
+Everything in it can be changed later in the plugin settings. To see the pop-up again, use **Settings → My Note Minimap → Screen refresh rate → Open setup**, or the command *Open setup (refresh rate and full screen)*. The **Measure** button next to the refresh rate setting opens step 1 only.
 
 ## Using it
 
@@ -45,6 +55,7 @@ Open **Settings → My Note Minimap [Scrollbar]**. Every slider has − and + bu
 | **Margins and arrows** | Top, bottom and edge margins (automatic per device), touch area, arrow buttons, arrow size, what a tap does, step size, hold speed. |
 | **Minimap only** | Fast rendering, width, margins, top offset, height. |
 | **Scrolling** | Smooth scrolling and glide length, ignore small finger movements, screen refresh rate, animate the top and bottom bars. |
+| **Note zoom** | **Pinch to zoom notes** (off by default), zoom each note separately, show zoom percent, smallest and largest zoom, reset every note. |
 | **Tab arrows** | **Arrows switch tabs** (off by default), wrap around, pop-up pill, tab button, buzz when switching, notice on every tap. |
 | **Performance** | Get ready at start-up, faster loading, hold back jumps, scroll diagnostics. |
 | **Other** | Hide on mobile, and files or folders to exclude. |
@@ -62,11 +73,28 @@ Commands in the command palette: **Check for updates**, and an empty **Do nothin
 
 - **Force full screen.** Keeps the Android status bar hidden. Obsidian's Auto full screen hides it while you scroll down and shows it again when you scroll up or close the keyboard; the guard ignores those "show" requests and hides it again after rotating, returning to the app and closing the keyboard.
 - **Keep Obsidian's Auto full screen on.** Switches Obsidian's own setting back on if it gets turned off.
-- **Camera position** and **Keep this much space clear (px).** Keeps at least that much space free on the camera's edge so notes and bars never go under it (the larger of the number and what Android reports is used, so it is never added twice). The edge follows the phone when rotated. The slider has the usual − and + buttons, a number, a glide and a reset button. The minimap's own margins follow this space.
-- **What Android reports right now** shows the four values Android gives the app, to help choose the number.
+- **Detect the space automatically** (on). Finds how much space the camera needs, on any phone, without you choosing a number. Whatever Android reports for the camera's edge is remembered for this phone (the top in portrait, the cutout's own depth at a side in landscape). With the status bar hidden Android often reports 0, and Obsidian's layout sits *below* the status bar, so even with the bar showing Android reports 0 for it. So if nothing is known yet, the status bar is hidden and then shown for a moment (no animation), **once**, and two things are read: what Android reports for the camera edge, and how much **shorter the app's view gets** when the bar comes back (it loses exactly the bar's height). The larger is kept and the bar is hidden again. If neither can be measured, the standard 24 px status bar height is used as an estimate (the line under the settings says so; raise the slider if the bars still touch the camera). Nothing is overridden when Android already reports enough.
+- **Camera position** and **Keep at least this much space clear (px).** The slider is a minimum on top of the automatic space, for when it is not enough or detection is off; 0 means no minimum of your own. The space used on the camera's edge is the largest of what Android reports now, the automatic space and the slider, so it is never added twice. The edge follows the phone when rotated. The slider has the usual − and + buttons, a number, a glide and a reset button. The minimap's own margins follow this space.
+- **What Android reports right now** shows the four values Android gives the app, what was found for this phone, and the space in use. **Refresh** redraws it; **Detect again** forgets what was found, flashes the status bar once and measures anew, then tells you what it found. The line also shows the last check: the view's height with the bar hidden and showing, and what Android reported.
 - Also a command: **Toggle forced full screen (experimental)**.
 
 While it is off nothing runs. Turning it off puts everything back: the status bar returns and the extra space is removed. Limits: the bottom navigation bar cannot be hidden by a plugin, and a black strip at the top can only be changed in Android's own display settings for the app. If you still have the separate *Full Screen Guard* plugin, disable it, since both would do the same job.
+
+## Note zoom
+
+**Off by default.** Turn it on under **Settings → My Note Minimap → Note zoom → Pinch to zoom notes**.
+
+Pinch with two fingers on a note to make its text bigger or smaller (phone or tablet; any touch screen).
+
+- **Live and steady.** The text reflows as you pinch, and the place under your fingers stays under them. Moving both fingers together scrolls, so you can zoom and move in one gesture.
+- **Only the note.** Text, headings, lists, code, tables and checkboxes scale, in editing and reading view alike (the zoom stays when you switch). Obsidian's menus, bars and this plugin's strip keep their size. At 100% nothing at all is added, so a note looks exactly as Obsidian draws it.
+- **Remembered.** One zoom for every note, or, with **Zoom each note separately**, a level for each note (it follows the note when you rename it and goes when you delete it).
+- **Percent pill.** A small pill shows the percent while you zoom (turn it off with **Show zoom percent**). It sits just below the note's top bar, whatever its height and wherever it is (including the space Full Screen Guard holds clear for the camera), and below the Find bar when that is open.
+- **Range.** **Smallest zoom** (25 to 100%, 100 by default, so a note can only be made bigger until you lower it) and **Largest zoom** (100 to 500%, 300 by default).
+- **Commands** for the command palette (also useful on desktop, which has no pinch): *Zoom note in*, *Zoom note out* and *Reset note zoom* (steps of 10%).
+- **Reset zoom** in the settings puts every note back to 100%.
+
+Switching it off puts every note back to its normal size at once; the saved levels are kept for when you turn it on again. Nothing listens while it is off. Pinching on the scrollbar, on the Find bar or across two different notes is ignored.
 
 ## Search button opens Find
 
@@ -126,6 +154,12 @@ Nothing is sent about you or your notes. No analytics, no telemetry.
 
 Recent versions in short. Older notes are at the bottom.
 
+- **6.8.0:** The first-run pop-up now has two steps in one scrolling pop-up: the screen refresh rate (pick or measure it; it then moves on by itself), then the **full screen experience**: a switch that turns on Full Screen Guard, a **Detect automatically** button for the status bar / camera space (it also runs by itself when you switch it on), and the same slider as in the settings to adjust by hand, with a line showing the space kept clear. Done closes it. New **Setup** row in the settings and a command to open it again.
+- **6.7.1:** Full Screen Guard detection now also measures how much shorter the app's view gets when the status bar is shown, because on phones where Obsidian sits below the status bar Android reports 0 for it (so 6.7.0 found nothing there). If neither signal can be measured, the standard 24 px status bar height is used as an estimate instead of 0. **Detect again** now tells you the result, and the settings line shows the last check.
+- **6.7.0:** Full Screen Guard (experimental) now finds the camera's space **automatically** (new **Detect the space automatically**, on by default): it remembers what Android reports for this phone, and when Android never reports one it shows the status bar briefly, once, to read it. The slider stays, now as a minimum on top of the automatic space (the largest of the three is used, so nothing is added twice). The settings line shows what was found, and **Detect again** measures anew. Works for the top in portrait and at a side in landscape.
+- **6.6.2:** The zoom percent pill now sits just below the note's top bar wherever that bar is, instead of at a fixed distance: it follows the bar's real height and position on any phone or theme, the space Full Screen Guard (experimental) holds clear for the camera, and the Find bar when it is open. When the bar slides away it stays below the safe space at the top of the screen.
+- **6.6.1:** **Smallest zoom** is now 100% by default. Fixed the zoom pill showing a long decimal like *99.99853155200441%* (and the note being slightly under 100%): a slider caught mid-glide could save a value that was not on its steps. Every settings slider now saves only values on its own steps, and the zoom range and levels are always whole percents.
+- **6.6.0:** New **Note zoom** setting (off by default): pinch a note to change its text size, with live reflow, the place under your fingers kept steady, a level that is remembered (shared or per note), a percent pill, a range, and zoom in / out / reset commands.
 - **6.5.2:** The scrollbar (or minimap), its arrows and the page bubble now stay clear of Obsidian's Find bar. While Find is open the strip starts just below the bar and is that much shorter, following the bar's real height (the Replace row makes it taller), and goes back when Find closes. It is measured from the bar itself, so it works the same on any phone, tablet or desktop.
 - **6.5.1:** New **Search button opens Find** setting (off by default): a tap on the search button opens Find in the note; holding still opens the bookmark menu or the quick switcher.
 - **6.5.0:** New **Tab arrows** setting (off by default): Tab Arrows 2.0.0 merged in, with all its options and animations. The bookmark name box (and the bookmark list's filter box) now moves up out of the way of the on-screen keyboard automatically, on any device. The page bubble now always shows the page number: **Bubble shows**, the percent option and **Buzz on** are removed (page vibration buzzes on each new page); old saved values are cleared.
