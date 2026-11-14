@@ -1795,9 +1795,9 @@ body {
    zoom multiplies them, so the limit is that width times the zoom, and a drawing is always its usual size times the zoom). A drawing that
    is then wider than the note is dragged sideways inside its frame, and the note itself does not widen. A percentage would not do for the
    limit: its frame is as wide as the drawing, so the limit would depend on itself. Only drawings are touched: SVG images, and inline <svg>
-   except Obsidian's own icons, maths (already text-sized) and buttons. */
+   except Obsidian's own icons, maths (already text-sized; MathJax puts the class MathJax and a jax attribute on its mjx-container) and buttons. */
 .nm-zoomed.nm-zoom-svg :is(img[src*=".svg" i], img[src^="data:image/svg+xml" i]),
-.nm-zoomed.nm-zoom-svg svg:not(.svg-icon):not(mjx-container svg):not(.callout-icon svg):not(.metadata-container svg):not(button svg):not(.clickable-icon svg) {
+.nm-zoomed.nm-zoom-svg svg:not(.svg-icon):not(.MathJax svg):not([jax] svg):not(.callout-icon svg):not(.metadata-container svg):not(button svg):not(.clickable-icon svg) {
 	zoom: var(--nm-zoom, 1);
 	/* !important on purpose, for inline <svg> only (see the next rule): notes often give an SVG its own style="max-width:100%", and an
 	   inline style beats a stylesheet unless the stylesheet is important. */
@@ -1806,7 +1806,7 @@ body {
 
 /* An inline <svg> that fills its container (width="100%", or no width at all, as most hand-written diagrams are) has nothing for zoom to
    scale: zoom does not scale percentages. So it is made wider instead: its container's width times the zoom. */
-.nm-zoomed.nm-zoom-svg svg:not(.svg-icon):not(mjx-container svg):not(.callout-icon svg):not(.metadata-container svg):not(button svg):not(.clickable-icon svg):is([width="100%" i], :not([width])) {
+.nm-zoomed.nm-zoom-svg svg:not(.svg-icon):not(.MathJax svg):not([jax] svg):not(.callout-icon svg):not(.metadata-container svg):not(button svg):not(.clickable-icon svg):is([width="100%" i], :not([width])) {
 	zoom: 1;
 	width: calc(100% * var(--nm-zoom, 1));
 	max-width: none !important;
@@ -1834,7 +1834,7 @@ body {
 }
 
 /* A drawing that sits straight in a paragraph, or an inline <svg> in its block, pans in that block. */
-.nm-zoomed.nm-zoom-svg :is(p, div, figure):has(> img[src*=".svg" i], > img[src^="data:image/svg+xml" i], > svg:not(.svg-icon):not(mjx-container svg):not(.callout-icon svg):not(.metadata-container svg):not(button svg):not(.clickable-icon svg)) {
+.nm-zoomed.nm-zoom-svg :is(p, div, figure):has(> img[src*=".svg" i], > img[src^="data:image/svg+xml" i], > svg:not(.svg-icon):not(.MathJax svg):not([jax] svg):not(.callout-icon svg):not(.metadata-container svg):not(button svg):not(.clickable-icon svg)) {
 	overflow-x: auto;
 }
 
@@ -1855,7 +1855,6 @@ body {
 	font-variant-numeric: tabular-nums;
 	line-height: 1.2;
 	background: var(--background-primary-alt, #1e1e1e);
-	background: color-mix(in srgb, var(--background-primary-alt, #1e1e1e) 90%, transparent);
 	-webkit-backdrop-filter: blur(12px) saturate(1.2);
 	backdrop-filter: blur(12px) saturate(1.2);
 	color: var(--text-normal, #ddd);
@@ -1896,12 +1895,19 @@ body {
 	line-height: 1.2;
 	will-change: transform, opacity;
 	background: var(--background-primary-alt, #1e1e1e);
-	background: color-mix(in srgb, var(--background-primary-alt, #1e1e1e) 90%, transparent);
 	-webkit-backdrop-filter: blur(12px) saturate(1.2);
 	backdrop-filter: blur(12px) saturate(1.2);
 	color: var(--text-normal, #ddd);
 	border: 1px solid var(--background-modifier-border, #444);
 	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+}
+
+/* A slightly see-through pill where the browser can mix colours; the solid colour above is the fallback. */
+@supports (color: color-mix(in srgb, red, blue)) {
+	.nm-zoom-pill,
+	.nm-ta-pill {
+		background: color-mix(in srgb, var(--background-primary-alt, #1e1e1e) 90%, transparent);
+	}
 }
 
 .nm-ta-pill > span {
