@@ -28,7 +28,7 @@ const UPDATE_EVERY_MS = 24 * 60 * 60 * 1000; // the automatic check runs at most
 // The version of this code. It travels inside main.js, so it is always the version that is actually running (Obsidian
 // only reads manifest.json at start-up, and reading it from disk ourselves caused a hitch). Keep it equal to the
 // version in manifest.json; the release workflow refuses to publish if they differ.
-const PLUGIN_VERSION = '6.8.0';
+const PLUGIN_VERSION = '6.8.1';
 
 // 1 if version a is newer than b, -1 if older, 0 if the same ("1.2.3" style, a leading "v" is ignored).
 function cmpVer(a, b) {
@@ -7619,7 +7619,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Check for updates automatically')
-			.setDesc('Off by default. When on, contacts api.github.com about once a day when Obsidian starts to look for a newer release, and shows a notice if there is one. It never installs by itself.')
+			.setDesc('Off by default. About once a day at start-up, checks api.github.com for a newer version and shows a notice. It never installs by itself.')
 			.addToggle((t) =>
 				t.setValue(p.settings.autoUpdate).onChange(async (v) => {
 					p.settings.autoUpdate = v;
@@ -7640,7 +7640,7 @@ class MinimapSettingTab extends PluginSettingTab {
 		const paintUpdate = () => {
 			const st = p._updState;
 			const u = p._update;
-			let desc = 'Contacts api.github.com only when you tap the button. Installing then downloads the release files from github.com.';
+			let desc = 'Contacts api.github.com only when you tap the button; installing downloads the release files from github.com.';
 			if (p.settings.lastUpdateCheck) desc = 'Last checked ' + new Date(p.settings.lastUpdateCheck).toLocaleString() + '.';
 			if (st === 'checking') desc = 'Checking…';
 			else if (st === 'installing') desc = 'Downloading and installing ' + (u ? u.version : '') + '…';
@@ -7696,7 +7696,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		const touchSet = new Setting(containerEl)
 			.setName('Touch controls')
-			.setDesc('Turn off to let touches pass through to the note. The bar then only shows where you are.')
+			.setDesc('Off: touches go through to the note, and the bar only shows where you are.')
 			.addToggle((t) =>
 				t.setValue(p.settings.touchEnabled).onChange(async (v) => {
 					p.settings.touchEnabled = v;
@@ -7706,7 +7706,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Hide Obsidian scrollbar')
-			.setDesc("Hide Obsidian's own scrollbar in notes. Applied every time the plugin starts.")
+			.setDesc("Hides Obsidian's own scrollbar in notes. Applied every time the plugin starts.")
 			.addToggle((t) =>
 				t.setValue(p.settings.hideNativeScrollbar !== false).onChange(async (v) => {
 					p.settings.hideNativeScrollbar = v;
@@ -7717,7 +7717,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		const hideSet = new Setting(containerEl)
 			.setName('Hide scrollbar')
-			.setDesc('Hide the bar and its arrow buttons and give the note the full width.')
+			.setDesc('Hides the bar and gives the note the full width.')
 			.addToggle((t) =>
 				t.setValue(p.settings.hideScrollbar).onChange(async (v) => {
 					p.settings.hideScrollbar = v;
@@ -7727,7 +7727,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		const btnSet = new Setting(containerEl)
 			.setName('Header button')
-			.setDesc('Add a hand button to the note header. Tap it to turn touch on or off. Long-press it to hide or show the bar.')
+			.setDesc('Adds a hand button to the note header. Tap: touch on or off. Long-press: hide or show the bar.')
 			.addToggle((t) =>
 				t.setValue(p.settings.touchButton).onChange(async (v) => {
 					p.settings.touchButton = v;
@@ -7739,10 +7739,10 @@ class MinimapSettingTab extends PluginSettingTab {
 		const syncNames = (style) => {
 			const mini = style === 'minimap';
 			const nm = mini ? 'minimap' : 'scrollbar';
-			touchSet.setDesc('Turn off to let touches pass through to the note. The ' + (mini ? 'minimap' : 'bar') + ' then only shows where you are.' + (mini ? '' : ' The arrow buttons stay, if they are on.'));
+			touchSet.setDesc('Off: touches go through to the note, and the ' + (mini ? 'minimap' : 'bar') + ' only shows where you are.' + (mini ? '' : ' The arrow buttons stay, if they are on.'));
 			hideSet.setName('Hide ' + nm);
-			hideSet.setDesc(mini ? 'Hide the minimap and give the note the full width.' : 'Hide the bar and give the note the full width. The arrow buttons stay, if they are on.');
-			btnSet.setDesc('Add a hand button to the note header. Tap it to turn touch on or off. Long-press it to hide or show the ' + nm + '.');
+			hideSet.setDesc(mini ? 'Hides the minimap and gives the note the full width.' : 'Hides the bar and gives the note the full width. The arrow buttons stay, if they are on.');
+			btnSet.setDesc('Adds a hand button to the note header. Tap: touch on or off. Long-press: hide or show the ' + nm + '.');
 		};
 		syncNames(p.settings.style);
 
@@ -7751,7 +7751,7 @@ class MinimapSettingTab extends PluginSettingTab {
 		const styleFolds = {};
 		new Setting(containerEl)
 			.setName('Style')
-			.setDesc('Scrollbar is a thin bar you drag. Minimap is a small preview of your note (can be slow on long notes).')
+			.setDesc('Scrollbar: a thin bar you drag. Minimap: a small preview of the note (can be slow on long notes).')
 			.addDropdown((d) =>
 				d
 					.addOption('scrollbar', 'Scrollbar')
@@ -7821,7 +7821,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Page bubble')
-			.setDesc('Show a small circle with the page number when you scroll.')
+			.setDesc('Shows a small circle with the page number while you scroll.')
 			.addToggle((t) =>
 				t.setValue(p.settings.pageBubble !== false).onChange(async (v) => {
 					p.settings.pageBubble = v;
@@ -7831,12 +7831,12 @@ class MinimapSettingTab extends PluginSettingTab {
 			);
 		containerEl.insertBefore(pageWrap, null); // keeps the row right under the toggle
 
-		slider('Page length', 'How much text is one page, in characters. Counted in the text, so rotating or unfolding never changes it.', 'pageLen', 600, 4000, 100, undefined, pageInner);
+		slider('Page length', 'Characters per page. Counted in the text, so rotating or unfolding the phone never changes it.', 'pageLen', 600, 4000, 100, undefined, pageInner);
 
 		if (Platform.isMobile) {
 			new Setting(containerEl)
 				.setName('Page vibration')
-				.setDesc('A light buzz as you scroll through the note. Works even with the bubble off.')
+				.setDesc('A light buzz on each new page as you scroll. Works even with the bubble off.')
 				.addToggle((t) =>
 					t.setValue(p.settings.pageHaptics !== false).onChange(async (v) => {
 						p.settings.pageHaptics = v;
@@ -7847,7 +7847,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Page bookmarks')
-			.setDesc('Long-press the search button in the bottom bar: bookmark the page you are on (named "Page 23" by default, rename it as you like) and open the list of all your bookmarks, in every note and tab. Off: the search button works exactly as Obsidian made it. The commands "Bookmark this page" and "Show page bookmarks" do the same from the command palette.')
+			.setDesc('Hold the search button in the bottom bar to bookmark the page you are on (named "Page 23" by default; rename it as you like) or to open your bookmarks from every note. Off: the button works as normal. The commands "Bookmark this page" and "Show page bookmarks" do the same.')
 			.addToggle((t) =>
 				t.setValue(p.settings.bookmarksOn !== false).onChange(async (v) => {
 					p.settings.bookmarksOn = v;
@@ -7865,7 +7865,7 @@ class MinimapSettingTab extends PluginSettingTab {
 			);
 		new Setting(containerEl)
 			.setName('Search button opens Find')
-			.setDesc('Off by default. Phone and tablet app only. A quick tap on the search button in the bottom bar opens Find in the note you are reading (the same Find bar as Menu > Find...) instead of the quick switcher. Holding the button still opens the bookmark menu when Page bookmarks is on; when Page bookmarks is off, holding goes to the quick switcher, so it is never out of reach. With no note open, the button works as Obsidian made it.')
+			.setDesc('Off by default. Phone and tablet app only. Tap the search button in the bottom bar to open Find in the note (the same bar as Menu > Find...) instead of the quick switcher. Hold it to open the bookmark menu (Page bookmarks on) or the quick switcher (Page bookmarks off). With no note open, it works as normal.')
 			.addToggle((t) =>
 				t.setValue(p.settings.searchFind === true).onChange(async (v) => {
 					p.settings.searchFind = v;
@@ -7885,7 +7885,7 @@ class MinimapSettingTab extends PluginSettingTab {
 			});
 			new Setting(host)
 				.setName('Shape')
-				.setDesc('How round the bar corners are.')
+				.setDesc('How round the bar\'s corners are.')
 				.addDropdown((d) =>
 					d
 						.addOption('pill', 'Pill (fully round)')
@@ -7909,7 +7909,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 			new Setting(host)
 				.setName('Show track')
-				.setDesc('Show a faint line behind the bar.')
+				.setDesc('Shows a faint line behind the bar.')
 				.addToggle((t) =>
 					t.setValue(p.settings.showTrack).onChange(async (v) => {
 						p.settings.showTrack = v;
@@ -7919,7 +7919,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 			new Setting(host)
 				.setName('Track when idle')
-				.setDesc('What the faint track does when the note has stopped moving. Fades away: it fades out after a moment and comes back when you scroll. Stays: it is always there.')
+				.setDesc('What the faint track does when the note stops moving. Fades away: fades out and returns when you scroll. Stays: always visible.')
 				.addDropdown((d) =>
 					d
 						.addOption('fade', 'Fades away')
@@ -7935,7 +7935,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 			new Setting(host)
 				.setName('Glow')
-				.setDesc('Add a soft glow around the bar.')
+				.setDesc('Adds a soft glow around the bar.')
 				.addToggle((t) =>
 					t.setValue(p.settings.glow).onChange(async (v) => {
 						p.settings.glow = v;
@@ -7989,7 +7989,7 @@ class MinimapSettingTab extends PluginSettingTab {
 			slider('Top margin', 'Space above the bar, so the screen corner does not cover it.', 'insetTop', 0, 240, 2);
 			slider('Bottom margin', 'Space below the bar, so the gesture bar does not cover it.', 'insetBottom', 0, 240, 2);
 			slider('Edge margin', 'Space between the bar and the screen edge, in pixels.', 'insetEdge', 0, 60, 1);
-			slider('Touch area', 'How wide the area is that reacts to your finger, in pixels.', 'hitWidth', 20, 140, 2, (v) => {
+			slider('Touch area', 'Width of the area that reacts to your finger, in pixels.', 'hitWidth', 20, 140, 2, (v) => {
 				const need = p.barWidth() + 6;
 				if (v < need) {
 					p.settings.hitWidth = need;
@@ -7999,7 +7999,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 			new Setting(host)
 				.setName('Arrow buttons')
-				.setDesc('Add up and down arrows. Tap to scroll a little, hold to keep scrolling.')
+				.setDesc('Adds up and down arrows. Tap to scroll a little, hold to keep scrolling.')
 				.addToggle((t) =>
 					t.setValue(p.settings.showArrows).onChange(async (v) => {
 						p.settings.showArrows = v;
@@ -8012,7 +8012,7 @@ class MinimapSettingTab extends PluginSettingTab {
 			slider('Arrow size', 'How big each arrow button is, in pixels.', 'arrowSize', 14, 80, 1, undefined, arrowFold.inner);
 			new Setting(arrowFold.inner)
 				.setName('Arrow tap does')
-				.setDesc('Scroll a step: a tap moves the note a fixed distance. Jump to heading: a tap goes to the next or previous heading. Holding always scrolls.')
+				.setDesc('Scroll a step: a tap moves a fixed distance. Jump to heading: a tap goes to the next or previous heading. Holding always scrolls.')
 				.addDropdown((d) =>
 					d
 						.addOption('step', 'Scroll a step')
@@ -8037,7 +8037,7 @@ class MinimapSettingTab extends PluginSettingTab {
 		{
 			new Setting(host)
 				.setName('Fast rendering')
-				.setDesc('Makes the minimap run faster on long notes. It looks the same.')
+				.setDesc('Makes the minimap faster on long notes. It looks the same.')
 				.addToggle((t) =>
 					t.setValue(p.settings.fastRender).onChange(async (v) => {
 						p.settings.fastRender = v;
@@ -8045,12 +8045,12 @@ class MinimapSettingTab extends PluginSettingTab {
 					})
 				);
 
-			slider('Width', 'How wide the minimap is, as a % of the note.', 'width', 3, 30, 1);
+			slider('Width', 'Minimap width, as a % of the note.', 'width', 3, 30, 1);
 			slider('Minimap edge margin', 'Space between the minimap and the screen edge, in pixels.', 'mapEdge', 0, 40, 1);
-			slider('Minimap top margin', 'Space between the header and the top of the minimap, in pixels. Automatic is measured on your device, so it fits any screen.', 'mapTop', 0, 200, 1);
+			slider('Minimap top margin', 'Space between the header and the top of the minimap, in pixels. Automatic is measured on your device.', 'mapTop', 0, 200, 1);
 			slider('Minimap bottom margin', 'Space between the bottom bar and the bottom of the minimap, in pixels. Automatic is measured on your device.', 'mapBottom', 0, 200, 1);
-			slider('Top offset', 'How far down it starts, as a % of the space between the header and the bottom bar. 0 starts right under the header.', 'top', 0, 50, 1);
-			slider('Height', 'How tall the minimap is, as a % of that space. 100 fills it.', 'height', 20, 100, 5);
+			slider('Top offset', 'Where it starts, as a % of the space between the header and the bottom bar. 0 starts right under the header.', 'top', 0, 50, 1);
+			slider('Height', 'Minimap height, as a % of that space. 100 fills it.', 'height', 20, 100, 5);
 		
 		}
 		host = containerEl;
@@ -8059,7 +8059,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Smooth scrolling')
-			.setDesc('Scroll with a soft glide instead of jumping.')
+			.setDesc('Scrolls with a soft glide instead of jumping.')
 			.addToggle((t) =>
 				t.setValue(p.settings.smooth).onChange(async (v) => {
 					p.settings.smooth = v;
@@ -8070,7 +8070,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		const smoothFold = fold(p.settings.smooth);
 		slider('Glide length', 'How long the glide lasts, in milliseconds. Longer is softer.', 'smoothMs', 80, 800, 20, undefined, smoothFold.inner);
-		slider('Ignore small movements', 'While you hold the scrollbar or minimap, movement smaller than this many pixels is ignored, so a resting finger that drifts a little does not move the note. Once you move further, it follows you as normal. 0 turns it off.', 'dragSlop', 0, 24, 1);
+		slider('Ignore small movements', 'Movements smaller than this many pixels are ignored while you hold the scrollbar or minimap, so a resting finger that drifts does not move the note. Move further and it follows you. 0 turns it off.', 'dragSlop', 0, 24, 1);
 
 		{
 			const cur = p.settings.refreshRate || 0;
@@ -8080,7 +8080,7 @@ class MinimapSettingTab extends PluginSettingTab {
 			let rateDD = null;
 			new Setting(containerEl)
 				.setName('Screen refresh rate')
-				.setDesc('Helps arrow scrolling stay smooth. Leave on Automatic unless it looks jumpy.')
+				.setDesc('Keeps arrow scrolling smooth. Leave on Automatic unless it looks jumpy.')
 				.addDropdown((d) => {
 					rateDD = d;
 					d.addOption('0', 'Automatic');
@@ -8104,14 +8104,14 @@ class MinimapSettingTab extends PluginSettingTab {
 			if (Platform.isMobileApp) {
 				new Setting(containerEl)
 					.setName('Setup')
-					.setDesc('Opens the first-time setup again: the refresh rate, then the full screen experience with automatic detection of the camera space.')
+					.setDesc('Opens the first-time setup again: the refresh rate, then the full screen experience with automatic camera-space detection.')
 					.addButton((b) => b.setButtonText('Open setup').onClick(() => new RefreshRateModal(this.app, p, null, false, true).open()));
 			}
 		}
 
 		new Setting(containerEl)
 			.setName('Animate top and bottom bars')
-			.setDesc('Slide and fade the header and the bottom bar out of the way while you scroll, and bring them back when you stop. Holding an arrow hides them; Obsidian\'s own hide-on-scroll gets the same smooth slide.')
+			.setDesc('Slides the header and bottom bar away while you scroll and back when you stop. Holding an arrow hides them. Obsidian\'s own hide-on-scroll gets the same smooth slide.')
 			.addToggle((t) =>
 				t.setValue(p.settings.animateBars).onChange(async (v) => {
 					p.settings.animateBars = v;
@@ -8148,7 +8148,7 @@ class MinimapSettingTab extends PluginSettingTab {
 		const taOn = p.settings.taOn === true;
 		new Setting(containerEl)
 			.setName('Arrows switch tabs')
-			.setDesc("Off by default. Phone and tablet app only. The left and right arrows in the bottom bar go to the previous and next tab, in the same order as Obsidian's tab switcher. Holding an arrow still opens the history list. Turning it off gives the arrows back to Obsidian.")
+			.setDesc("Off by default. Phone and tablet app only. The bottom bar's left and right arrows go to the previous and next tab, in the order of Obsidian's tab switcher. Holding an arrow still opens the history list. Off: the arrows work as normal.")
 			.addToggle((t) =>
 				t.setValue(taOn).onChange(async (v) => {
 					p.settings.taOn = v;
@@ -8172,7 +8172,7 @@ class MinimapSettingTab extends PluginSettingTab {
 			}
 			new Setting(taFold.inner)
 				.setName('Wrap around')
-				.setDesc('From the last tab, the right arrow goes to the first, and the left arrow from the first goes to the last. Off: the arrow at either end is greyed out.')
+				.setDesc('From the last tab, next goes to the first (and previous from the first goes to the last). Off: the arrow at either end is greyed out.')
 				.addToggle((t) =>
 					t.setValue(p.settings.taWrap !== false).onChange(async (v) => {
 						p.settings.taWrap = v;
@@ -8181,7 +8181,7 @@ class MinimapSettingTab extends PluginSettingTab {
 				);
 			new Setting(taFold.inner)
 				.setName('Pop-up pill')
-				.setDesc('A small pill above the bottom bar says which tab you moved to, for example "Tab 2 of 5". While it is on, the tab button in the bottom bar shows a tabs icon instead of a number.')
+				.setDesc('A small pill above the bottom bar tells you which tab you moved to, like "Tab 2 of 5". While it is on, the tab button shows a tabs icon instead of a number.')
 				.addToggle((t) =>
 					t.setValue(p.settings.taPill !== false).onChange(async (v) => {
 						p.settings.taPill = v;
@@ -8195,7 +8195,7 @@ class MinimapSettingTab extends PluginSettingTab {
 			host = containerEl;
 			new Setting(taBtnFold.inner)
 				.setName('Tab button')
-				.setDesc('What the box in the bottom bar shows. Obsidian shows how many tabs are open; these show which one you are on. Only available while the pop-up pill is off.')
+				.setDesc('What the tab button in the bottom bar shows. Obsidian shows how many tabs are open; these show which one you are on. Only used while the pop-up pill is off.')
 				.addDropdown((d) =>
 					d
 						.addOption('current', 'Current tab number')
@@ -8233,7 +8233,7 @@ class MinimapSettingTab extends PluginSettingTab {
 		const zoomOn = p.settings.zoomOn === true;
 		new Setting(containerEl)
 			.setName('Pinch to zoom notes')
-			.setDesc('Off by default. Pinch with two fingers on a note to make its text bigger or smaller (phone and tablet). The text reflows as you pinch and the place under your fingers stays put. Only the note is scaled: Obsidian\'s menus and bars keep their size. The zoom is remembered, and there are commands to zoom in, zoom out and reset for the command palette.')
+			.setDesc('Off by default. Pinch a note with two fingers to make its text bigger or smaller (phone and tablet). The text resizes live and the spot under your fingers stays put. Only the note changes size, not Obsidian\'s menus or bars. The zoom is remembered, and the command palette has zoom in, zoom out and reset.')
 			.addToggle((t) =>
 				t.setValue(zoomOn).onChange(async (v) => {
 					p.settings.zoomOn = v;
@@ -8245,7 +8245,7 @@ class MinimapSettingTab extends PluginSettingTab {
 		{
 			new Setting(zoomFold.inner)
 				.setName('Zoom each note separately')
-				.setDesc('Off: one zoom for every note. On: each note remembers its own zoom (a table-heavy note can be small while prose is large).')
+				.setDesc('Off: one zoom for all notes. On: each note keeps its own (a table-heavy note can be small while prose is large).')
 				.addToggle((t) =>
 					t.setValue(p.settings.zoomPerNote === true).onChange(async (v) => {
 						p.settings.zoomPerNote = v;
@@ -8261,11 +8261,11 @@ class MinimapSettingTab extends PluginSettingTab {
 						await p.saveSettings();
 					})
 				);
-			slider('Smallest zoom', 'How far a note can be made smaller, in percent. 100 (the default) is the normal size: notes can only be made bigger. Lower it to allow smaller text.', 'zoomMin', 25, 100, 5, undefined, zoomFold.inner);
-			slider('Largest zoom', 'How far a note can be made bigger, in percent.', 'zoomMax', 100, 500, 10, undefined, zoomFold.inner);
+			slider('Smallest zoom', 'How small a note can get, in percent. 100 (the default) is normal size, so notes can only be made bigger; lower it to allow smaller text.', 'zoomMin', 25, 100, 5, undefined, zoomFold.inner);
+			slider('Largest zoom', 'How big a note can get, in percent.', 'zoomMax', 100, 500, 10, undefined, zoomFold.inner);
 			new Setting(zoomFold.inner)
 				.setName('Reset every note to 100%')
-				.setDesc('Puts the shared zoom and every note\'s own zoom back to the normal size.')
+				.setDesc('Puts the shared zoom and every note\'s own zoom back to 100%.')
 				.addButton((b) =>
 					b.setButtonText('Reset zoom').onClick(async () => {
 						p.settings.zoomPct = 100;
@@ -8280,7 +8280,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Get ready while Obsidian starts')
-			.setDesc('Does the first-time work while Obsidian is still opening, so the first scroll is smooth. Takes effect next time Obsidian starts.')
+			.setDesc('Does the first-time work while Obsidian is still opening, so the first scroll is smooth. Applies from the next start.')
 			.addToggle((t) =>
 				t.setValue(p.settings.startPrep).onChange(async (v) => {
 					p.settings.startPrep = v;
@@ -8313,7 +8313,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Hold back jumps')
-			.setDesc('Stops sudden jumps while you hold an arrow: if the note moves more than the text did, it is put back.')
+			.setDesc('Stops jumps while you hold an arrow: if the note moves further than the text did, it is put back.')
 			.addToggle((t) =>
 				t.setValue(p.settings.holdGuard !== false).onChange(async (v) => {
 					p.settings.holdGuard = v;
@@ -8323,7 +8323,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Scroll diagnostics')
-			.setDesc('After holding an arrow, show a short report on how smooth it was. Only for troubleshooting.')
+			.setDesc('After holding an arrow, shows a short report on how smooth it was. For troubleshooting only.')
 			.addToggle((t) =>
 				t.setValue(p.settings.diagnostics).onChange(async (v) => {
 					p.settings.diagnostics = v;
@@ -8335,7 +8335,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Hide on mobile')
-			.setDesc('Turn the minimap off on phones and tablets.')
+			.setDesc('Turns the minimap off on phones and tablets.')
 			.addToggle((t) =>
 				t.setValue(p.settings.hideOnMobile).onChange(async (v) => {
 					p.settings.hideOnMobile = v;
@@ -8359,7 +8359,7 @@ class MinimapSettingTab extends PluginSettingTab {
 		const guardOn = p.settings.fsgEnabled === true;
 		new Setting(containerEl)
 			.setName('Full Screen Guard (experimental)')
-			.setDesc("Experimental. Off by default. Phone app only. Keeps Android's status bar hidden and keeps notes and Obsidian's bars clear of the camera cutout. Turning it off puts everything back the way Obsidian does it.")
+			.setDesc("Experimental. Off by default. Phone app only. Hides Android's status bar and keeps notes and Obsidian's bars clear of the camera cutout. Off: everything is as Obsidian does it.")
 			.addToggle((t) =>
 				t.setValue(guardOn).onChange(async (v) => {
 					p.settings.fsgEnabled = v;
@@ -8394,7 +8394,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 			new Setting(guardFold.inner)
 				.setName('Force full screen')
-				.setDesc('Keeps the Android status bar hidden. Obsidian normally shows it again when you scroll up or close the keyboard; this stops that. The bottom navigation bar of Android cannot be hidden by a plugin.')
+				.setDesc('Keeps the status bar hidden. Obsidian normally brings it back when you scroll up or close the keyboard; this stops that. Android\'s bottom navigation bar cannot be hidden by a plugin.')
 				.addToggle((t) =>
 					t.setValue(p.settings.fsgForce !== false).onChange(async (v) => {
 						p.settings.fsgForce = v;
@@ -8404,7 +8404,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 			new Setting(guardFold.inner)
 				.setName("Keep Obsidian's Auto full screen on")
-				.setDesc("Turns Obsidian's own Auto full screen setting (Settings → Interface) back on if it gets switched off. That setting hides the note title bar and bottom bar while you scroll down.")
+				.setDesc("Switches Obsidian's Auto full screen (Settings → Interface) back on if it gets turned off. It hides the title bar and bottom bar while you scroll down.")
 				.addToggle((t) =>
 					t.setValue(p.settings.fsgKeepAuto !== false).onChange(async (v) => {
 						p.settings.fsgKeepAuto = v;
@@ -8414,7 +8414,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 			new Setting(guardFold.inner)
 				.setName('Camera position')
-				.setDesc('Which edge of the screen the camera hole is on. "Top of phone" follows the phone when it is turned: in landscape the camera edge becomes the left or right side. Change it only if the space is reserved on the wrong side.')
+				.setDesc('Which screen edge has the camera. "Top of phone" follows rotation (in landscape the camera is on the left or right). Change it only if space is kept clear on the wrong side.')
 				.addDropdown((d) =>
 					d
 						.addOptions({ 'device-top': 'Top of phone (follows rotation)', top: 'Always the top of the screen', left: 'Always the left side', right: 'Always the right side' })
@@ -8428,7 +8428,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 			new Setting(guardFold.inner)
 				.setName('Detect the space automatically')
-				.setDesc("On by default. Finds how much space the camera needs, on any phone: it remembers whatever Android reports (even for a moment), and if Android never reports one, the status bar is shown briefly, once, to read it, then hidden again. Turn it off to use only the slider below.")
+				.setDesc("On by default. Works out how much space the camera needs, on any phone. It remembers what Android reports; if Android reports nothing, the status bar is shown for a moment, once, to measure it. Off: only the slider below is used.")
 				.addToggle((t) =>
 					t.setValue(p.settings.fsgAuto !== false).onChange(async (v) => {
 						p.settings.fsgAuto = v;
@@ -8439,7 +8439,7 @@ class MinimapSettingTab extends PluginSettingTab {
 
 			slider(
 				'Keep at least this much space clear (px)',
-				'A minimum on the camera edge, for when the automatic space is not enough or detection is off. 0 means no minimum of your own. The space is never added twice: the largest of this number, the automatic space and what Android reports now is used. If notes or bars still touch the camera, raise this until they clear it.',
+				'Your own minimum for the camera edge; 0 means none. The space used is the largest of this number, the automatic space and what Android reports, so nothing is added twice. If notes or bars still touch the camera, raise it until they clear.',
 				'fsgPadding',
 				0,
 				120,
