@@ -128,7 +128,8 @@
 }
 
 .note-minimap.nm-scrollbar .nm-clip {
-	display: contents;
+	/* Nothing in it is shown in this style (the bars are hidden and the canvas is never made), so the wrapper is simply not drawn. */
+	display: none;
 }
 
 /* Moved with a transform; its own layer keeps the dimming overlays from flickering. contain keeps
