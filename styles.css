@@ -120,8 +120,8 @@
 	overflow: hidden;
 	border-radius: inherit;
 	/* overflow + border-radius alone does not clip children that sit on their own graphics layer (the canvas, the
-	   moving lines): their square corners poke out. A clip-path does clip them. */
-	clip-path: inset(0 round 12px);
+	   moving lines): their square corners poke out. Paint containment clips them to the rounded box as well. */
+	contain: paint;
 	isolation: isolate;
 	pointer-events: none;
 	z-index: 0;
@@ -1800,9 +1800,9 @@ body {
 .nm-zoomed.nm-zoom-svg :is(img[src*=".svg" i], img[src^="data:image/svg+xml" i]),
 .nm-zoomed.nm-zoom-svg svg:not(.svg-icon):not(.MathJax svg):not([jax] svg):not(.callout-icon svg):not(.metadata-container svg):not(button svg):not(.clickable-icon svg) {
 	zoom: var(--nm-zoom, 1);
-	/* !important on purpose, for inline <svg> only (see the next rule): notes often give an SVG its own style="max-width:100%", and an
-	   inline style beats a stylesheet unless the stylesheet is important. */
-	max-width: var(--nm-note-w, 100%) !important;
+	/* A note's own style="max-width:100%" on an inline <svg> would beat this rule, so the script lifts that inline value off the
+	   drawing while it is zoomed (and puts it back afterwards): so no priority override is needed. */
+	max-width: var(--nm-note-w, 100%);
 }
 
 /* An inline <svg> that fills its container (width="100%", or no width at all, as most hand-written diagrams are) has nothing for zoom to
@@ -1810,18 +1810,18 @@ body {
 .nm-zoomed.nm-zoom-svg svg:not(.svg-icon):not(.MathJax svg):not([jax] svg):not(.callout-icon svg):not(.metadata-container svg):not(button svg):not(.clickable-icon svg):is([width="100%" i], :not([width])) {
 	zoom: 1;
 	width: calc(100% * var(--nm-zoom, 1));
-	max-width: none !important;
+	max-width: none;
 }
 
 /* The frame of an embedded SVG image: never wider than the note, and it pans. */
-.nm-zoomed.nm-zoom-svg .image-embed:has(img[src*=".svg" i], img[src^="data:image/svg+xml" i]) {
+.nm-zoomed.nm-zoom-svg .image-embed.nm-svg-embed {
 	max-width: 100%;
 	overflow-x: auto;
 }
 
 /* Reading view: the frame is an inline element, so it needs a box to limit and scroll, as wide as the drawing (max-content: a frame is
    otherwise never wider than the space left in its line). */
-.nm-zoomed.nm-zoom-svg :is(.markdown-preview-view, .markdown-rendered) .image-embed:has(img[src*=".svg" i], img[src^="data:image/svg+xml" i]) {
+.nm-zoomed.nm-zoom-svg :is(.markdown-preview-view, .markdown-rendered) .image-embed.nm-svg-embed {
 	display: inline-block;
 	vertical-align: top;
 	width: max-content;
@@ -1829,13 +1829,14 @@ body {
 
 /* The editor: Obsidian sizes the image as 100% of a wrapper, inside a frame that fits it. The wrapper is as wide as the drawing, and
    the frame (limited above) shows part of it and pans. */
-.nm-zoomed.nm-zoom-svg .cm-content .image-embed:has(img[src*=".svg" i], img[src^="data:image/svg+xml" i]) .image-wrapper {
+.nm-zoomed.nm-zoom-svg .cm-content .image-embed.nm-svg-embed .image-wrapper {
 	width: max-content;
 	flex: none;
 }
 
-/* A drawing that sits straight in a paragraph, or an inline <svg> in its block, pans in that block. */
-.nm-zoomed.nm-zoom-svg :is(p, div, figure):has(> img[src*=".svg" i], > img[src^="data:image/svg+xml" i], > svg:not(.svg-icon):not(.MathJax svg):not([jax] svg):not(.callout-icon svg):not(.metadata-container svg):not(button svg):not(.clickable-icon svg)) {
+/* A drawing that sits straight in a paragraph, or an inline <svg> in its block, pans in that block (the script tags the block
+   nm-svg-host; the frames of SVG images get nm-svg-embed). Plain class names, because the parent-looking selector is slow for the browser to keep up to date. */
+.nm-zoomed.nm-zoom-svg .nm-svg-host {
 	overflow-x: auto;
 }
 
@@ -2013,4 +2014,22 @@ body {
 	justify-content: center;
 	background: transparent;
 	box-shadow: none;
+}
+
+/* ---- Settings: toggles ----
+   Some themes draw the off state of a toggle in the same colour as the on state with the knob blended into the track, so an off
+   toggle looked like an on toggle with no knob. Inside this plugin's settings the off state is always a neutral track with a visible knob. */
+.nm-settings .checkbox-container:not(.is-enabled) {
+	background-color: var(--background-modifier-border-hover, #555);
+	border-color: transparent;
+}
+
+.nm-settings .checkbox-container:not(.is-enabled)::after {
+	background-color: var(--text-muted, #bbb);
+	opacity: 1;
+}
+
+.nm-settings .checkbox-container.is-enabled::after {
+	background-color: var(--toggle-thumb-color, #fff);
+	opacity: 1;
 }

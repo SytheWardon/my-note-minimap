@@ -28,7 +28,7 @@ const UPDATE_EVERY_MS = 24 * 60 * 60 * 1000; // the automatic check runs at most
 // The version of this code. It travels inside main.js, so it is always the version that is actually running (Obsidian
 // only reads manifest.json at start-up, and reading it from disk ourselves caused a hitch). Keep it equal to the
 // version in manifest.json; the release workflow refuses to publish if they differ.
-const PLUGIN_VERSION = '7.0.2';
+const PLUGIN_VERSION = '7.0.3';
 
 // 1 if version a is newer than b, -1 if older, 0 if the same ("1.2.3" style, a leading "v" is ignored).
 function cmpVer(a, b) {
@@ -2531,6 +2531,7 @@ class NoteZoom {
 		this.pillTimer = 0;
 		this.applyRaf = 0;
 		this.watchers = new Map(); // view -> ResizeObserver, while its SVG drawings are zoomed (to keep --nm-note-w current)
+		this.markers = new Map(); // view -> MutationObserver, while its SVG drawings are zoomed (to tag them for the stylesheet)
 	}
 
 	get s() {
@@ -2599,6 +2600,8 @@ class NoteZoom {
 		for (const view of this.views()) this.applyTo(view, 100); // every note back to its normal size
 		for (const ro of this.watchers.values()) ro.disconnect();
 		this.watchers.clear();
+		for (const mo of this.markers.values()) mo.disconnect(); // notes that closed while zoomed
+		this.markers.clear();
 	}
 
 	// ----- levels -----------------------------------------------------------------------------------------------
@@ -2738,6 +2741,75 @@ class NoteZoom {
 		}
 	}
 
+	// Tags the SVG drawings of a zoomed note for the stylesheet, which used to find them with :has() (slow to invalidate) and
+	// beat a note's own inline max-width with !important. Frames of SVG images get nm-svg-embed, the block that holds a drawing
+	// gets nm-svg-host, and an inline max-width on an inline <svg> is lifted off (kept in data-nm-mw) while the note is zoomed.
+	markSvgs(view, on) {
+		const root = view && view.contentEl;
+		if (!root) return;
+		const IMG = 'img[src*=".svg" i], img[src^="data:image/svg+xml" i]';
+		const DRAWING = 'svg:not(.svg-icon):not(.MathJax svg):not([jax] svg):not(.callout-icon svg):not(.metadata-container svg):not(button svg):not(.clickable-icon svg)';
+		const host = (el) => {
+			const par = el.parentElement;
+			if (par && par.matches('p, div, figure')) par.classList.add('nm-svg-host');
+		};
+		if (!on) {
+			const mo = this.markers.get(view);
+			if (mo) mo.disconnect();
+			this.markers.delete(view);
+			for (const el of root.querySelectorAll('.nm-svg-embed')) el.classList.remove('nm-svg-embed');
+			for (const el of root.querySelectorAll('.nm-svg-host')) el.classList.remove('nm-svg-host');
+			for (const el of root.querySelectorAll('[data-nm-mw]')) {
+				const mw = el.getAttribute('data-nm-mw');
+				el.removeAttribute('data-nm-mw');
+				if (mw) el.style.setProperty('max-width', mw);
+			}
+			return;
+		}
+		const tagImg = (img) => {
+			const emb = img.closest('.image-embed');
+			if (emb) emb.classList.add('nm-svg-embed');
+			host(img);
+		};
+		const tagDrawing = (svg) => {
+			host(svg);
+			const mw = svg.style && svg.style.getPropertyValue('max-width');
+			if (mw) {
+				svg.setAttribute('data-nm-mw', mw);
+				svg.style.removeProperty('max-width');
+			}
+		};
+		// Looks at a part of the note: the element itself and whatever is inside it.
+		const scan = (scope) => {
+			if (scope.matches(IMG)) tagImg(scope);
+			else if (scope.matches(DRAWING)) tagDrawing(scope);
+			for (const img of scope.querySelectorAll(IMG)) tagImg(img);
+			for (const svg of scope.querySelectorAll(DRAWING)) tagDrawing(svg);
+		};
+		if (this.markers.has(view)) return; // already tagged, and the observer below keeps it that way (this runs on every pinch step)
+		scan(root);
+		if (typeof MutationObserver === 'function') {
+			// Only what was added since the last look is scanned (typing in the editor adds and removes lines all the time),
+			// and only once per frame, instead of searching the whole note again each time.
+			let raf = 0;
+			const added = new Set();
+			const mo = new MutationObserver((list) => {
+				for (const r of list) {
+					for (const n of r.addedNodes) if (n.nodeType === 1) added.add(n);
+				}
+				if (raf || !added.size) return;
+				raf = window.requestAnimationFrame(() => {
+					raf = 0;
+					const todo = Array.from(added);
+					added.clear();
+					for (const n of todo) if (n.isConnected) scan(n);
+				});
+			});
+			mo.observe(root, { childList: true, subtree: true });
+			this.markers.set(view, mo);
+		}
+	}
+
 	// Puts a note at a level: at 100 every trace is removed. Returns true when something changed.
 	applyTo(view, level) {
 		const el = view && view.contentEl;
@@ -2748,6 +2820,7 @@ class NoteZoom {
 		const svgChanged = el.classList.contains('nm-zoom-svg') !== svg;
 		el.classList.toggle('nm-zoom-svg', svg);
 		this.watchColumn(view, svg);
+		this.markSvgs(view, svg);
 		if (level === 100) {
 			if (!now) return svgChanged;
 			el.classList.remove('nm-zoomed');
@@ -7760,6 +7833,12 @@ class MinimapSettingTab extends PluginSettingTab {
 			for (const n of below) n.style.willChange = '';
 		};
 		hAnim.onfinish = () => wrap._foldEnd && wrap._foldEnd(true);
+		// Safety net: some phones never fire onfinish (animations paused while the settings sheet is busy), which left the group
+		// open under a toggle that was already off. Whatever happens, the group is closed shortly after the animation's time.
+		const end = wrap._foldEnd;
+		window.setTimeout(() => {
+			if (wrap._foldEnd === end) end(true);
+		}, 700);
 	}
 
 	// The element that scrolls the settings page.
@@ -7778,6 +7857,7 @@ class MinimapSettingTab extends PluginSettingTab {
 		const { containerEl } = this;
 		const p = this.plugin;
 		containerEl.empty();
+		containerEl.addClass('nm-settings');
 
 		new Setting(containerEl).setName('Updates').setHeading();
 
@@ -7991,6 +8071,11 @@ class MinimapSettingTab extends PluginSettingTab {
 					p.settings.pageBubble = v;
 					this.setFold(pageWrap, v);
 					await p.saveSettings();
+					// Whatever the animation did, the row ends up matching the switch.
+					window.setTimeout(() => {
+						if (!pageWrap.isConnected || pageWrap._foldEnd || pageWrap._foldOpen) return;
+						pageWrap.toggleClass('nm-collapsed', p.settings.pageBubble === false);
+					}, 800);
 				})
 			);
 		containerEl.insertBefore(pageWrap, null); // keeps the row right under the toggle
