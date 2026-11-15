@@ -1161,12 +1161,12 @@ html body.nm-animate-bars.is-hidden-nav.is-phone.is-floating-nav .mod-root .work
 }
 
 @media (prefers-reduced-motion: reduce) {
-	.setting-item input[type="range"]::-webkit-slider-thumb,
-	.setting-item input[type="range"]::-moz-range-thumb,
-	.setting-item .clickable-icon {
+	.nm-settings .setting-item input[type="range"]::-webkit-slider-thumb,
+	.nm-settings .setting-item input[type="range"]::-moz-range-thumb,
+	.nm-settings .setting-item .clickable-icon {
 		transition: none;
 	}
-	.setting-item .clickable-icon.nm-reset-spin svg {
+	.nm-settings .setting-item .clickable-icon.nm-reset-spin svg {
 		animation: none;
 	}
 }
@@ -2012,20 +2012,21 @@ body {
 	box-shadow: none;
 }
 
-/* ---- Settings: toggles ----
-   Some themes draw the off state of a toggle in the same colour as the on state with the knob blended into the track, so an off
-   toggle looked like an on toggle with no knob. Inside this plugin's settings the off state is always a neutral track with a visible knob. */
-.nm-settings .checkbox-container:not(.is-enabled) {
-	background-color: var(--background-modifier-border-hover, #555) !important;
-	border-color: transparent !important;
+/* ---- Toggles ----
+   Some themes draw the off state of a toggle in the same colour as the on state, with the knob blended into the track, so an off
+   toggle looks like an on toggle with no knob. Everywhere in Obsidian the off state is a neutral track with a visible knob.
+   The selector repeats a class instead of forcing priority, so it beats a theme's rules by specificity. */
+body .checkbox-container.checkbox-container.checkbox-container:not(.is-enabled) {
+	background-color: var(--background-modifier-border-hover, #555);
+	border-color: transparent;
 }
 
-.nm-settings .checkbox-container:not(.is-enabled)::after {
-	background-color: var(--text-muted, #bbb) !important;
-	opacity: 1 !important;
+body .checkbox-container.checkbox-container.checkbox-container:not(.is-enabled)::after {
+	background-color: var(--text-muted, #bbb);
+	opacity: 1;
 }
 
-.nm-settings .checkbox-container.is-enabled::after {
-	background-color: var(--toggle-thumb-color, #fff) !important;
-	opacity: 1 !important;
+body .checkbox-container.checkbox-container.checkbox-container.is-enabled::after {
+	background-color: var(--toggle-thumb-color, #fff);
+	opacity: 1;
 }
