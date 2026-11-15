@@ -4729,13 +4729,13 @@ class NoteMinimapPlugin extends Plugin {
 		const RE = /Action not configured|Configure pull action|Do nothing \(pull-down action\)/;
 		const hideIfPrompt = (n) => {
 			if (n && n.nodeType === 3) n = n.parentElement; // text set on an existing label arrives as a text node
-			if (!(n instanceof HTMLElement) || n.hasAttribute('data-nm-nopull') || n.closest('.note-minimap, .modal, .vertical-tab-content')) return false;
+			if (!(n instanceof HTMLElement) || n.hasAttribute('data-nm-nopull') || n.closest('.note-minimap, .modal, .modal-container, .vertical-tab-content, .setting-item, .menu, .suggestion-container, .prompt, .workspace-leaf, .mobile-navbar, .view-content')) return false;
 			if (n.childElementCount > 8) return false;
 			const t = n.textContent;
 			if (!t || t.length > 140 || !RE.test(t)) return false;
 			// Hide the whole piece, not just the text node's parent: climb while the parent holds nothing more.
 			let el = n;
-			while (el.parentElement && el.parentElement !== document.body && el.parentElement.textContent.length <= t.length + 2) el = el.parentElement;
+			for (let up = 0; up < 3 && el.parentElement && el.parentElement !== document.body && el.parentElement.textContent.length <= t.length + 2 && !el.parentElement.querySelector('input, button, .workspace-leaf, .view-content, .checkbox-container'); up++) el = el.parentElement;
 			el.setAttribute('data-nm-nopull', '');
 			// Actually hide it (the attribute alone changes nothing). Inline and important, so Obsidian's own inline styles on the label can't win.
 			el.style.setProperty('visibility', 'hidden', 'important');
@@ -4787,6 +4787,12 @@ class NoteMinimapPlugin extends Plugin {
 		this.register(() => {
 			mo.disconnect();
 			if (timer) clearTimeout(timer);
+			// Give back everything that was hidden, so disabling the plugin leaves Obsidian exactly as it was.
+			document.querySelectorAll('[data-nm-nopull]').forEach((e) => {
+				e.removeAttribute('data-nm-nopull');
+				e.style.removeProperty('visibility');
+				e.style.removeProperty('opacity');
+			});
 		});
 	}
 
