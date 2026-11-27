@@ -97,6 +97,26 @@ Pinch with two fingers on a note to make its text bigger or smaller (phone or ta
 
 Switching it off puts every note back to its normal size at once; the saved levels are kept for when you turn it on again. Nothing listens while it is off. Pinching on the scrollbar, on the Find bar or across two different notes is ignored.
 
+## Rotation fix
+
+**The glitch.** On Android, turning the phone between portrait and landscape makes Obsidian relay out the note several times in a row, at sizes in between. You see it as stale-width frames (text wrapped for the old width), the header sitting on top of the text, and the note jumping to a different place.
+
+**What the fix does.** It is on by default and works on phones and tablets only (nothing runs on desktop).
+
+1. It notices that the screen turned (width and height swapped) and swallows the burst of resizes before Obsidian reacts to them.
+2. It hides the note behind a clean background so the in-between frames are never drawn.
+3. It waits until the screen size has stopped changing, then lets Obsidian relay out **once**.
+4. It puts the note back at the line that was at the top before you turned, and fades the note back in.
+
+Opening the keyboard also resizes the screen, but it does not flip portrait and landscape, so it is left alone. The screen is never held for more than about 1.2 seconds, even if the size keeps changing.
+
+**Settings** (Settings → My Note Minimap → Rotation fix):
+
+- **Fix the glitch when the screen rotates:** the main switch. Off gives you Obsidian's normal behaviour.
+- **Hide the note while rotating:** covers the half-resized frames, then fades the note back in. Off: you see the layout move, but nothing is covered.
+- **Restore scroll position:** keeps the same line at the top of the note after rotating.
+- **Settle delay (ms):** how long the screen size must stay the same before the layout is released (80 to 400, default 160). Raise it if you still see glitching; lower it for a snappier turn.
+
 ## Search button opens Find
 
 **Off by default.** Phone and tablet app only. Turn it on under **Settings → My Note Minimap → Search button opens Find** (next to the bookmark settings).
@@ -146,8 +166,8 @@ A normal tap on the search button still opens Obsidian's quick switcher; only a 
 
 The plugin runs on your device and collects no data. Its only network requests are for updates, and only to GitHub (this repository's releases):
 
-- **api.github.com** (1 request): reads the latest release's version number. Made when you tap *Check for updates*, or about once a day at start-up if you turn on *Check for updates automatically* (off by default).
-- **github.com** release downloads (1 request per file): `main.js`, `manifest.json` and `styles.css`, fetched only after you tap *Update to X*.
+- **api.github.com** (2 requests): reads the list of releases and tags to find the newest version number. Made when you tap *Check for updates*, or about once a day at start-up if you turn on *Check for updates automatically* (off by default).
+- **github.com** release downloads, or **raw.githubusercontent.com** when a version has no release files (1 request per file): `main.js`, `manifest.json` and `styles.css`, fetched only after you tap *Update to X*.
 
 Nothing is sent about you or your notes. No analytics, no telemetry.
 
@@ -155,6 +175,7 @@ Nothing is sent about you or your notes. No analytics, no telemetry.
 
 Recent versions in short. Older notes are at the bottom.
 
+- **7.0.6:** Update check fixed. It was stuck on 7.0.3 and did not see newer versions. It now looks at every release and at the tags (not only the one GitHub marks "latest") and picks the highest version, so 7.0.4 and 7.0.5 are found; if a version has no release files, the update is read from the tag instead. Settings page simplified: every description is now one short line. The Rotation fix section above is rewritten to explain the glitch and each setting.
 - **7.0.3:** The page-bubble toggle can no longer leave "Page length" showing after it is switched off, and an off toggle in these settings always shows a visible knob. Style-checker warnings cleared: `clip-path` is replaced by paint containment, the two `!important` rules are gone (the script lifts a note's inline `max-width` off zoomed inline SVGs instead), and the four `:has()` selectors are replaced by classes the script adds to SVG drawings, which are tagged only when they appear (not by searching the whole note again), and not again on every pinch step.
 - **7.0.2:** In the scrollbar style the invisible clipping wrapper is now `display: none` instead of `display: contents` (it holds nothing shown in that style), which drops one style-checker warning. No change in how anything looks or behaves.
 - **7.0.1:** Style-checker clean-up with no change in behaviour: the maths exclusion in the zoom rules now uses MathJax's own `.MathJax` class and `jax` attribute instead of the `mjx-container` element, the two pill backgrounds use a solid colour with a `color-mix` upgrade inside `@supports` (no more duplicate `background`), and the minimum Obsidian version is now 1.8.0, which covers the mask, `display: contents` and `:has` support the styles rely on.
